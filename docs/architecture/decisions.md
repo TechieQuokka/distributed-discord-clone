@@ -200,7 +200,10 @@
 - **구현(persist 위치)**: Realm 액터는 ID·순서만 확정해 이벤트를 방출하고(코어는 IO 무의존, P2),
   **단일 소비자인 dispatch 드라이버**(gateway)가 events 채널을 받아 `persist → fanout → 세션 배달` 순서로 처리한다.
   단일 액터가 순서대로 방출 → 단일 소비자가 순서대로 persist → 순서 보존. nonce 중복이면 persist 단계에서 멱등 스킵(D34).
-- **현황(Phase 1)**: per-session seq는 세션 노드가 부여(구현됨). **RESUME 재생버퍼는 Phase 2** — 현재는 재연결 시 INVALID_SESSION 후 재IDENTIFY.
+- **현황(Phase 2, 구현됨)**: per-session seq + bounded 재생 버퍼(기본 256)를 **Hub**(세션 소유 노드)가 보유.
+  소켓 끊김 = `detach`(live sender만 분리, 버퍼·구독·seq 유지, grace 90s) → RESUME이 `resume_token`(CSPRNG, D20) +
+  last seq 검증 후 누락 프레임 재생 + `RESUMED`(t="RESUMED" dispatch). 버퍼 밖 gap·토큰 불일치·만료는 INVALID_SESSION
+  → 재IDENTIFY + REST 재조회. RESUME은 버퍼가 노드 로컬이라 **동일 노드** 재연결에 한함(크로스노드 RESUME은 후속).
 
 ### D25. 테스트 = 유닛 + DST + e2e
 - **결정론적 시뮬레이션(DST)**: 가상 시계 + 시뮬레이션 네트워크 + 시드 RNG로 클러스터를 단일 프로세스에서 재현 가능 실행, 카오스(지연/유실/파티션) 주입.

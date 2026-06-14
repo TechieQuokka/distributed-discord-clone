@@ -31,7 +31,7 @@ fn message_create_payload(d: &LocalDelivery) -> serde_json::Value {
 /// dispatch 드라이버(로컬 소유)와 크로스노드 inbound 루프(원격 RealmFanout 수신) 양쪽이 사용.
 pub async fn deliver_local(hub: &Hub, d: &LocalDelivery) {
     let event = ServerEvent { t: "MESSAGE_CREATE".into(), d: message_create_payload(d) };
-    hub.deliver(&d.user_ids, &event).await;
+    hub.deliver(&d.user_ids, &event);
 }
 
 /// 이벤트 루프. server가 `tokio::spawn`으로 구동. 모든 송신측 drop 시 종료.

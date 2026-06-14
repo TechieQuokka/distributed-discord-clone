@@ -30,8 +30,20 @@ pub struct IdentifyData {
     pub token: String,
 }
 
+/// RESUME 페이로드 (gateway.md §2). 세션 재개 자격증명 + 마지막 수신 seq.
+#[derive(Deserialize)]
+pub struct ResumeData {
+    /// 세션 id (READY에서 받은 문자열).
+    pub session_id: String,
+    /// CSPRNG resume 토큰 (READY에서 받음, D20).
+    pub token: String,
+    /// 클라가 마지막으로 받은 dispatch seq.
+    #[serde(default)]
+    pub seq: u64,
+}
+
 /// 서버 → 클라 송신 프레임. DISPATCH만 `s`/`t` 포함.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Outgoing {
     pub op: u8,
     pub d: Value,
@@ -57,6 +69,11 @@ impl Outgoing {
     /// DISPATCH: 이벤트 이름 `t` + per-session 시퀀스 `s` (D24).
     pub fn dispatch(seq: u64, t: impl Into<String>, d: Value) -> Self {
         Self { op: op::DISPATCH, d, s: Some(seq), t: Some(t.into()) }
+    }
+    /// RESUMED: 재생 완료 신호. DISPATCH 형태(t="RESUMED"), 현재 마지막 seq를 실어 보냄
+    /// (새 이벤트 아님 → 버퍼/seq 증가 없음, gateway.md §2).
+    pub fn resumed(last_seq: u64) -> Self {
+        Self { op: op::DISPATCH, d: Value::Null, s: Some(last_seq), t: Some("RESUMED".into()) }
     }
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())

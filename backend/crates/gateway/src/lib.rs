@@ -16,6 +16,6 @@ pub mod session;
 pub mod state;
 
 pub use dispatch::{deliver_local, run_dispatch};
-pub use hub::Hub;
+pub use hub::{Hub, ResumeOutcome};
 pub use routes::router;
 pub use state::GatewayState;

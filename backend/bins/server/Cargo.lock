@@ -684,6 +684,7 @@ dependencies = [
  "futures-util",
  "node",
  "protocol",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "tokio",
