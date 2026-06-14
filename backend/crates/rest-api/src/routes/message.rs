@@ -45,11 +45,16 @@ async fn list_messages<S: Store + 'static>(
         .map(|n| ChannelId(Snowflake::from_raw(n)))
         .map_err(|_| ApiError::BadRequest("invalid channel id".into()))?;
 
-    // 채널 → realm 확인 후 멤버십 검사.
+    // 채널 → realm 확인 후 채널 권한 검사 (D17): 히스토리 조회는 VIEW_CHANNEL + READ_MESSAGE_HISTORY 필요.
     let channel = st.store.get(channel_id).await?.ok_or(ApiError::NotFound)?;
-    if !st.store.is_member(channel.realm_id, user).await? {
-        return Err(ApiError::Forbidden);
-    }
+    crate::perm::require_in_channel(
+        &*st.store,
+        channel_id,
+        channel.realm_id,
+        user,
+        domain::permissions::Permissions::VIEW_CHANNEL | domain::permissions::Permissions::READ_MESSAGE_HISTORY,
+    )
+    .await?;
 
     let before = match q.before {
         Some(s) => Some(

@@ -139,9 +139,8 @@ async fn pump<S: Store + 'static, T: NodeTransport>(
                     Some(Ok(Message::Text(txt))) => {
                         if let Ok(inc) = serde_json::from_str::<Incoming>(txt.as_str()) {
                             match inc.op {
-                                op::HEARTBEAT => {
-                                    if send(socket, Outgoing::heartbeat_ack()).await.is_err() { break; }
-                                }
+                                op::HEARTBEAT
+                                    if send(socket, Outgoing::heartbeat_ack()).await.is_err() => { break; }
                                 _ => {} // RESUME/IDENTIFY는 핸드셰이크 단계 전용. 그 외 무시.
                             }
                         }
@@ -204,11 +203,10 @@ async fn await_handshake<S: Store + 'static, T: NodeTransport>(
                             }
                         }
                     }
-                    op::HEARTBEAT => {
-                        if send(socket, Outgoing::heartbeat_ack()).await.is_err() {
+                    op::HEARTBEAT
+                        if send(socket, Outgoing::heartbeat_ack()).await.is_err() => {
                             return None;
                         }
-                    }
                     _ => {}
                 }
             }

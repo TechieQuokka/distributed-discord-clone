@@ -19,7 +19,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(s: &str) -> Result<Vec<u8>, AuthError> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(AuthError::Token("odd hex length".into()));
     }
     (0..s.len())

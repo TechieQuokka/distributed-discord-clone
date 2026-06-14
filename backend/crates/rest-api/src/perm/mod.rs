@@ -60,7 +60,7 @@ pub async fn effective_in_channel<S: Store>(
     ))
 }
 
-/// 멤버이면서 `needed` 권한을 모두 가질 때만 통과, 아니면 403.
+/// 멤버이면서 `needed` 권한을 모두 가질 때만 통과, 아니면 403 (길드 컨텍스트).
 pub async fn require<S: Store>(
     store: &S,
     realm: RealmId,
@@ -71,6 +71,24 @@ pub async fn require<S: Store>(
         return Err(ApiError::Forbidden);
     }
     if effective(store, realm, user).await?.contains(needed) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// 채널 컨텍스트(오버라이드 적용)에서 `needed`를 모두 가질 때만 통과, 아니면 403.
+pub async fn require_in_channel<S: Store>(
+    store: &S,
+    channel_id: ChannelId,
+    realm: RealmId,
+    user: UserId,
+    needed: Permissions,
+) -> Result<(), ApiError> {
+    if !store.is_member(realm, user).await? {
+        return Err(ApiError::Forbidden);
+    }
+    if effective_in_channel(store, channel_id, realm, user).await?.contains(needed) {
         Ok(())
     } else {
         Err(ApiError::Forbidden)

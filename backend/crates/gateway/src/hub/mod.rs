@@ -59,11 +59,10 @@ impl SessionEntry {
     /// live 소켓 채널로 push. 채널이 가득(느린 클라)하거나 닫혔으면 **live를 drop**(끊김, D27)
     /// → 세션 채널이 닫혀 pump가 종료·소켓 close. 프레임은 이미 버퍼에 있어 RESUME으로 복구.
     fn push_live(&mut self, frame: Outgoing) {
-        if let Some(tx) = &self.live {
-            if tx.try_send(frame).is_err() {
+        if let Some(tx) = &self.live
+            && tx.try_send(frame).is_err() {
                 self.live = None; // backpressure: 느린 세션 분리(버퍼 유지).
             }
-        }
     }
 }
 
@@ -207,14 +206,13 @@ impl Hub {
 
 impl Inner {
     fn drop_session(&mut self, session_id: u64) {
-        if let Some(e) = self.sessions.remove(&session_id) {
-            if let Some(set) = self.by_user.get_mut(&e.user_id) {
+        if let Some(e) = self.sessions.remove(&session_id)
+            && let Some(set) = self.by_user.get_mut(&e.user_id) {
                 set.remove(&session_id);
                 if set.is_empty() {
                     self.by_user.remove(&e.user_id);
                 }
             }
-        }
     }
 
     /// grace를 넘긴 detached 세션 정리 (버퍼 무한 증식 방지).

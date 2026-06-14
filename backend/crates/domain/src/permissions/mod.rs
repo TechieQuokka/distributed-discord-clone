@@ -224,7 +224,7 @@ mod tests {
 
         // @everyone 채널 오버라이드: SEND 차단.
         let deny_send = cow(realm_id, Permissions::empty(), Permissions::SEND_MESSAGES);
-        let p = effective_channel_permissions(false, realm_id, user_id, everyone, &[], &[deny_send.clone()]);
+        let p = effective_channel_permissions(false, realm_id, user_id, everyone, &[], std::slice::from_ref(&deny_send));
         assert!(!p.contains(Permissions::SEND_MESSAGES), "채널 @everyone deny → 막힘");
         assert!(p.contains(Permissions::VIEW_CHANNEL));
 

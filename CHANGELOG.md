@@ -5,6 +5,12 @@
 
 ---
 
+## [1.21.1] - 2026-06-14
+### 수정
+- **검증 패스**: 메시지 히스토리 조회(`GET /channels/:id/messages`)가 멤버십만 검사하고 채널 권한을 무시하던 **불일치 수정** — 이제 `perm::require_in_channel`로 VIEW_CHANNEL + READ_MESSAGE_HISTORY 강제(D17, 전송 경로와 일관). 라이브 검증: @everyone VIEW_CHANNEL deny 시 히스토리 403, owner는 200. rest-api 1.3.0→1.3.1.
+- clippy 정리(machine-applicable): gateway(collapsible if/let-chains)·auth(is_multiple_of)·domain(slice::from_ref). 동작 변화 없음. (잔여: transport tcp 리더 루프·cli gateway_client의 pre-existing 1줄씩은 의도적 보류.)
+- 전 crate 테스트 67개 통과 + CLI scenario(D1) 재확인 + 초대/권한/오버라이드/히스토리 2유저 라이브 재검증.
+
 ## [1.21.0] - 2026-06-14
 ### 새 기능
 - **채널 권한 오버라이드 (D17)** (Phase 3) — 채널별 역할/멤버 allow·deny. 길드 허용을 채널 deny가 덮어씀. 2유저 라이브 검증.
