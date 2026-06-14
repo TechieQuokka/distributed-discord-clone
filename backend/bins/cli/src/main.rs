@@ -26,6 +26,10 @@ enum Command {
     Refresh(RefreshArgs),
     /// 길드 생성 (기본 'general' 채널 포함).
     CreateGuild(CreateGuildArgs),
+    /// 길드 초대 코드 생성 (멤버 전용).
+    CreateInvite(CreateInviteArgs),
+    /// 초대 코드로 길드 합류.
+    Join(JoinArgs),
     /// 채널에 메시지 전송 (REST → gateway로 팬아웃).
     Send(SendArgs),
     /// Gateway(WS) 연결 → 이벤트 구독·출력.
@@ -61,6 +65,27 @@ struct CreateGuildArgs {
     token: String,
     #[arg(long)]
     name: String,
+}
+#[derive(Args)]
+struct CreateInviteArgs {
+    #[arg(long)]
+    token: String,
+    /// 길드(realm) id.
+    #[arg(long)]
+    guild: String,
+    /// 최대 사용 횟수 (0 = 무제한).
+    #[arg(long, default_value_t = 0)]
+    max_uses: i32,
+    /// 유효기간(초, 0 = 무기한).
+    #[arg(long, default_value_t = 0)]
+    max_age: i64,
+}
+#[derive(Args)]
+struct JoinArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    code: String,
 }
 #[derive(Args)]
 struct SendArgs {
@@ -109,6 +134,21 @@ async fn main() -> std::process::ExitCode {
             println!("  id       = {}", g.id);
             println!("  name     = {}", g.name);
             for c in &g.channels {
+                println!("  channel  = {} ({})", c.id, c.name.clone().unwrap_or_default());
+            }
+        }),
+        Command::CreateInvite(a) => rest::create_invite(&base, &a.token, &a.guild, a.max_uses, a.max_age)
+            .await
+            .map(|inv| {
+                println!("✅ invite created");
+                println!("  code      = {}", inv.code);
+                println!("  guild     = {}", inv.realm_id);
+                println!("  max_uses  = {}", inv.max_uses);
+                println!("  expires_at= {}", inv.expires_at.map(|e| e.to_string()).unwrap_or_else(|| "never".into()));
+            }),
+        Command::Join(a) => rest::join_invite(&base, &a.token, &a.code).await.map(|j| {
+            println!("✅ joined guild {}", j.realm_id);
+            for c in &j.channels {
                 println!("  channel  = {} ({})", c.id, c.name.clone().unwrap_or_default());
             }
         }),

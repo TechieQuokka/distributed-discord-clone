@@ -74,7 +74,7 @@
 - [ ] 채널 권한 오버라이드
 - [ ] DM / 그룹DM (Realm + dm_pairs, DB-D2)
 - [ ] 멤버 관리 (nick/joined/roles)
-- [ ] 초대 (invites)
+- [x] 초대 (invites)  # domain Invite/port + storage(트랜잭션 redeem)+V4 마이그레이션 + REST(생성/redeem) + CLI(create-invite/join). 2유저 라이브 검증(초대→합류→자동구독→크로스유저 팬아웃)
 - [ ] 리액션 / 편집·삭제(소프트) / 멘션 / 답장
 - [ ] 친구·차단 (relationships)
 - [ ] 읽음 상태 / 미읽음 카운트 (read_states)

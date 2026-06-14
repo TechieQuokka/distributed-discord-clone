@@ -5,6 +5,7 @@ use core::future::Future;
 use crate::channel::{Channel, NewChannel};
 use crate::guild::NewGuild;
 use crate::id::{ChannelId, MessageId, RealmId, RefreshTokenId, UserId};
+use crate::invite::{Invite, NewInvite};
 use crate::message::{Message, NewMessage};
 use crate::refresh_token::{NewRefreshToken, RefreshToken};
 use crate::user::{NewUser, User};
@@ -89,6 +90,25 @@ pub trait GuildRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<RealmId>, RepoError>> + Send;
 }
 
+/// 초대 저장소 port (Phase 3, 스키마 `invites`). 길드 합류 토큰.
+pub trait InviteRepository: Send + Sync {
+    fn create_invite(&self, inv: &NewInvite) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    fn find_invite(
+        &self,
+        code: &str,
+    ) -> impl Future<Output = Result<Option<Invite>, RepoError>> + Send;
+
+    /// 트랜잭션 redeem: 유효하면 멤버 추가(멱등) + uses 증가 후 `realm_id` 반환.
+    /// 무효(미존재/만료/소진)면 `Ok(None)` — 호출측이 404로 매핑.
+    fn redeem_invite(
+        &self,
+        code: &str,
+        user: UserId,
+        now_unix: i64,
+    ) -> impl Future<Output = Result<Option<RealmId>, RepoError>> + Send;
+}
+
 /// 채널 저장소 port.
 pub trait ChannelRepository: Send + Sync {
     fn create_channel(
@@ -126,11 +146,21 @@ pub trait MessageRepository: Send + Sync {
 
 /// 모든 저장소 port를 한 타입이 구현 — 조합 루트에서 제네릭 1개로 주입 (제네릭 폭발 방지).
 pub trait Store:
-    UserRepository + RefreshTokenRepository + GuildRepository + ChannelRepository + MessageRepository
+    UserRepository
+    + RefreshTokenRepository
+    + GuildRepository
+    + InviteRepository
+    + ChannelRepository
+    + MessageRepository
 {
 }
 
 impl<T> Store for T where
-    T: UserRepository + RefreshTokenRepository + GuildRepository + ChannelRepository + MessageRepository
+    T: UserRepository
+        + RefreshTokenRepository
+        + GuildRepository
+        + InviteRepository
+        + ChannelRepository
+        + MessageRepository
 {
 }
