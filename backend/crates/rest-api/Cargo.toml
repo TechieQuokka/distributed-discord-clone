@@ -14,3 +14,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 storage = { path = "../storage" }
 tokio = { version = "1.52.3", features = ["rt", "macros"] }
 tracing = "0.1.44"
+
+[dev-dependencies]
+serde_json = "1.0.150"
+tower = { version = "0.5.3", features = ["util"] }

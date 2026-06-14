@@ -5,6 +5,10 @@
 
 ---
 
+## [1.21.2] - 2026-06-14
+### 테스트/품질
+- **rest-api 통합 테스트 7개 추가** (이전 0개) — in-memory `Store`(8개 repo trait 구현) + axum `oneshot`으로 DB 없이 핸들러·`AuthUser` 추출기·권한 강제·에러 매핑 검증. 커버: 무토큰 401, 길드 생성+@everyone, 채널생성 MANAGE_CHANNELS(비멤버 403/owner 단축), 초대 redeem→멤버화·미존재 404, 역할 생성 권한상승 방지, 역할 부여→권한 획득, **히스토리 VIEW_CHANNEL 게이팅 회귀 테스트**(1.21.1 수정분). dev-dep `tower`/`serde_json`. 전 crate 합계 74개.
+
 ## [1.21.1] - 2026-06-14
 ### 수정
 - **검증 패스**: 메시지 히스토리 조회(`GET /channels/:id/messages`)가 멤버십만 검사하고 채널 권한을 무시하던 **불일치 수정** — 이제 `perm::require_in_channel`로 VIEW_CHANNEL + READ_MESSAGE_HISTORY 강제(D17, 전송 경로와 일관). 라이브 검증: @everyone VIEW_CHANNEL deny 시 히스토리 403, owner는 200. rest-api 1.3.0→1.3.1.

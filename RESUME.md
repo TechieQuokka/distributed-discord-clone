@@ -26,7 +26,7 @@
 - **인증 종단**: `/auth/register|login|refresh` (PASETO + refresh 회전/재사용탐지 D14).
 - **실시간 메시징 종단**: `PgStore`(통합 저장소, `Store` 슈퍼트레잇) → REST(`/guilds`, `/channels/:id/messages`, 히스토리 D38) → **WS Gateway**(IDENTIFY/READY/HEARTBEAT/DISPATCH, 자동구독 D13) → dispatch 드라이버(persist-then-fanout D24, nonce 멱등 D34) → 세션 push. CLI `scenario`로 종단 자동검증(D1).
 - Snowflake generator는 **노드당 1개**(D11, lock-free CAS)를 server가 소유해 Router·REST·Gateway에 주입.
-- 테스트 **67개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 포함) + CLI scenario·멀티노드·초대/권한/채널오버라이드 2유저 라이브 검증. DB 라이브(V1~V6 적용).
+- 테스트 **74개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 + rest-api 통합 7개 포함) + CLI scenario·멀티노드·초대/권한/채널오버라이드 2유저 라이브 검증. DB 라이브(V1~V6 적용).
 
 ## 3. 빌드·테스트·DB (⚠ crate별 독립 — R7)
 

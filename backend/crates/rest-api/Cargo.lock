@@ -1408,8 +1408,10 @@ dependencies = [
  "node",
  "rand",
  "serde",
+ "serde_json",
  "storage",
  "tokio",
+ "tower",
  "tracing",
 ]
 
