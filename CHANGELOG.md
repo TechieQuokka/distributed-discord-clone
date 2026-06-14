@@ -8,6 +8,7 @@
 ## [1.21.2] - 2026-06-14
 ### 테스트/품질
 - **rest-api 통합 테스트 7개 추가** (이전 0개) — in-memory `Store`(8개 repo trait 구현) + axum `oneshot`으로 DB 없이 핸들러·`AuthUser` 추출기·권한 강제·에러 매핑 검증. 커버: 무토큰 401, 길드 생성+@everyone, 채널생성 MANAGE_CHANNELS(비멤버 403/owner 단축), 초대 redeem→멤버화·미존재 404, 역할 생성 권한상승 방지, 역할 부여→권한 획득, **히스토리 VIEW_CHANNEL 게이팅 회귀 테스트**(1.21.1 수정분). dev-dep `tower`/`serde_json`. 전 crate 합계 74개.
+- 문서: `docs/api/rest.md`에 **구현 현황(Phase 1–3)** 블록 추가 — 실제 라우트(초대=길드 레벨, 역할 부여 PUT, 채널 권한 PUT, 히스토리/전송 권한 강제)를 청사진과 구분해 명시(R2 동기화).
 
 ## [1.21.1] - 2026-06-14
 ### 수정

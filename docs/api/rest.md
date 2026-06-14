@@ -37,6 +37,25 @@
 X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 ```
 
+### 구현 현황 (Phase 1–3, v1.21.x)
+
+> 아래 §1~ 표는 **전체 카피 대상 청사진**이다. **현재 실제 구현된 엔드포인트**는 다음과 같다(나머지는 후속 Phase).
+
+| 메서드 | 경로 | 강제 권한 | 비고 |
+|---|---|---|---|
+| POST | `/auth/{register,login,refresh}` | — | PASETO + refresh 회전/재사용탐지 (D14) |
+| POST | `/guilds` | — | 길드 + @everyone 역할 + 기본 general 채널 |
+| POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | |
+| GET / POST | `/guilds/{id}/roles` | GET=멤버 / POST=MANAGE_ROLES (권한상승 방지) | |
+| PUT | `/guilds/{id}/members/{user_id}/roles/{role_id}` | MANAGE_ROLES | 역할 부여 |
+| POST | `/guilds/{id}/invites` | CREATE_INVITE | **길드 레벨**(청사진의 채널 레벨 §4와 다름 — 단순화 채택) |
+| POST | `/invites/{code}` | (멤버 아님 무관) | redeem → members 추가 |
+| PUT | `/channels/{id}/permissions/{target_id}` | MANAGE_ROLES | 오버라이드 upsert (DELETE는 후속) |
+| GET | `/channels/{id}/messages` | VIEW_CHANNEL + READ_MESSAGE_HISTORY | 히스토리 커서 (D38) |
+| POST | `/channels/{id}/messages` | SEND_MESSAGES | **`gateway` crate가 서빙**(D31) — 채널 컨텍스트 권한 계산 후 persist-then-fanout (D24) |
+
+> 권한 계산은 채널 오버라이드까지 적용(D17): `@everyone` → 역할 OR → 채널 오버라이드(@everyone/역할/멤버) → owner/Administrator 단축. 미구현 항목(밴/이모지/스레드/감사로그/리액션/편집·삭제 등)은 TODO Phase 3~4.
+
 ---
 
 ## 1. Auth (`/auth`)
