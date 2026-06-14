@@ -216,6 +216,13 @@
 - **결정론적 시뮬레이션(DST)**: 가상 시계 + 시뮬레이션 네트워크 + 시드 RNG로 클러스터를 단일 프로세스에서 재현 가능 실행, 카오스(지연/유실/파티션) 주입.
 - `transport` trait + `actor-rt` 덕에 `SimTransport`+`SimClock` 주입만으로 가능. Phase 2부터.
 - + 유닛 테스트 + 소수 실프로세스 e2e (WS/Postgres 엣지).
+- **구현(Phase 2)**: `transport::sim` — `SimNetwork`(가상 시계 + `BinaryHeap` 시간순 스케줄 + 노드별 ready 큐) +
+  `SimTransport`(`NodeTransport` 구현, `send`는 즉시 큐 적재) + `DetRng`(splitmix64 시드 PRNG). 카오스 주입:
+  지연(`min/max_latency_ms`), 유실(`drop_prob`), 파티션(`partition`/`heal`). 하네스가 `advance_to`로 가상 시간을
+  진행시키면 그 시점까지 도착할 메시지를 `take_inbound`로 꺼내 `Router::handle_inbound`에 먹인다. SimClock =
+  `node::ManualClock`. `Router`/`RealmActor`는 이제 `Arc<dyn Clock>`를 주입받아(하드코딩 SystemClock 제거) DST에서
+  Snowflake id까지 결정론. 하네스 e2e(`node/tests/dst.rs`): 동일 시드 재현성 + 파티션 유실 검증.
+  후속: 액터까지 단일스레드 가상 실행기로 돌리는 완전 결정론 클러스터(현재 액터는 tokio, 네트워크 경로만 가상시간).
 
 ### D26. 관찰성 = tracing
 - `tracing` 크레이트 + 구조적 span + **노드 간 trace-id 전파**(프로토콜 헤더). (선택) OTel→Jaeger. **Phase 0부터.**

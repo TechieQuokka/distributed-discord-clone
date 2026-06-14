@@ -64,7 +64,7 @@
 - [x] Gateway RESUME — per-session seq + 재생 버퍼 (D24)  # Hub 영속 세션상태(seq+bounded버퍼+CSPRNG resume_token), detach/grace/replay/RESUMED, gap→INVALID
 - [x] Realm 상태 rehydrate (노드 재배치, D23)  # PING/PONG 생사판정(Membership)+owner_excluding failover; 새 소유 노드 actor fresh-spawn(Postgres 진실 보존). D35 캐시 warmup은 후속
 - [x] Backpressure — bounded 채널 + 느린 클라 끊기 (D27)  # Hub::push_live가 채널 가득 시 live drop→pump 종료·소켓 close; 버퍼 남아 RESUME 복구. 노드간/액터 메일박스 bounded
-- [ ] **DST 하네스** — SimTransport + SimClock (D25)
+- [x] **DST 하네스** — SimTransport + SimClock (D25)  # transport::sim(가상시간+시드 카오스: 지연/유실/파티션); Router/RealmActor에 Clock 주입→id 결정론; node/tests/dst.rs(재현성+파티션). 액터 가상실행기는 후속
 
 ---
 

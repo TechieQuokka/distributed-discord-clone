@@ -83,7 +83,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let transport = TcpTransport::new(node_id);
     let (events_tx, events_rx) = mpsc::channel(1024);
-    let router = Arc::new(Router::new(node_id, Arc::clone(&snowflakes), ring, transport.clone(), events_tx));
+    let router = Arc::new(Router::new(
+        node_id,
+        Arc::clone(&snowflakes),
+        Arc::clone(&clock),
+        ring,
+        transport.clone(),
+        events_tx,
+    ));
     let hub = Hub::new();
 
     // persist-then-fanout 드라이버 (D24).

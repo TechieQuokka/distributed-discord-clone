@@ -14,9 +14,10 @@
 
 필요 시 깊게: `docs/design-discussion.md`(논쟁 서사), `docs/database/*`, `docs/api/*`, `docs/protocol/node-wire.md`, `docs/architecture/permissions.md`.
 
-## 2. 현재 상태 (2026-06-14, v1.14.0)
+## 2. 현재 상태 (2026-06-14, v1.18.0)
 
-- 설계 문서 + Phase 0/1 **완료**. **Phase 2(분산 활성화) 진행 중** — raw-TCP+mTLS 멀티노드 메시 동작.
+- 설계 문서 + Phase 0/1 **완료**. **Phase 2(분산 활성화) 전 항목 완료** — 다음은 Phase 3(Discord 본체).
+- Phase 2 마감(1.15~1.18): **Gateway RESUME**(per-session seq+재생버퍼+CSPRNG resume_token, D24/D20) · **PING/PONG 생사판정+소유권 failover**(Membership+owner_excluding, D23) · **Backpressure**(느린 클라 끊기, D27) · **DST 하네스**(SimTransport+SimClock+시드 카오스, D25).
 - **멀티노드 라이브 검증**: 노드1↔노드2 mTLS 연결 + 공유 PASETO 키 → 노드1 WS 구독 + 노드2 REST 전송 → 노드1이 MESSAGE_CREATE 수신(크로스노드 팬아웃). 단일노드 모드도 유지.
 - 구조: `backend/`(rust, **독립 crate** — umbrella 워크스페이스 없음) + `frontend/`(web, 미착수) + `docs/`.
 - crate: `domain` `protocol` `actor-rt` `transport` `storage` `cluster-config` `node` `auth` `rest-api` `gateway` + `bins/{server,cli}`.
@@ -24,7 +25,7 @@
 - **인증 종단**: `/auth/register|login|refresh` (PASETO + refresh 회전/재사용탐지 D14).
 - **실시간 메시징 종단**: `PgStore`(통합 저장소, `Store` 슈퍼트레잇) → REST(`/guilds`, `/channels/:id/messages`, 히스토리 D38) → **WS Gateway**(IDENTIFY/READY/HEARTBEAT/DISPATCH, 자동구독 D13) → dispatch 드라이버(persist-then-fanout D24, nonce 멱등 D34) → 세션 push. CLI `scenario`로 종단 자동검증(D1).
 - Snowflake generator는 **노드당 1개**(D11, lock-free CAS)를 server가 소유해 Router·REST·Gateway에 주입.
-- 테스트 **44개** 통과 (DB 통합 + 실 mTLS 2노드 포함) + CLI scenario·멀티노드 라이브 검증. DB 라이브(V1/V2/V3 적용).
+- 테스트 **61개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 포함) + CLI scenario·멀티노드 라이브 검증. DB 라이브(V1/V2/V3 적용).
 
 ## 3. 빌드·테스트·DB (⚠ crate별 독립 — R7)
 
@@ -45,15 +46,16 @@ cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2F
 
 ## 4. 다음 작업 — 여기서 이어서
 
-Phase 2 전송/풀메시 **완료**(raw-TCP+mTLS `TcpTransport`, 크로스노드 라이브 검증). 남은 Phase 2:
+**Phase 2(분산 활성화) 전 항목 완료.** 다음은 **Phase 3 — Discord 본체** (TODO.md 참조). 우선순위 후보:
 
-1. **Gateway RESUME**: per-session 재생버퍼 + RESUME 재생(D24). 현재는 INVALID_SESSION 스텁.
-2. **Realm 상태 rehydrate**(D23): 피어 down 판정(PING/PONG failure detection — 현재 미구현) → 링 재배치 → 새 소유 노드가 Postgres에서 rehydrate.
-3. **Backpressure** 느린 클라 끊기 정책(D27, 현재 hub는 try_send로 드롭만).
-4. **DST 하네스**(SimTransport+SimClock, D25).
+1. **초대(invites)** — 멀티유저 채팅의 전제(현재는 길드 소유자 단독 흐름). 이게 풀리면 RESUME/팬아웃/failover를 다인원으로 라이브 검증 가능.
+2. **역할/권한 비트마스크 + 계산순서**(D17) + 채널 권한 오버라이드 — `docs/architecture/permissions.md` 청사진 존재.
+3. **멤버 관리**(nick/joined/roles), **DM/그룹DM**(Realm + dm_pairs, DB-D2).
+4. **리액션 / 편집·삭제(소프트) / 멘션·답장**, **친구·차단**, **읽음 상태**.
 
+> Phase 2 후속 seam(서두를 필요 없음): D35 Realm 최근메시지 캐시 warmup(rehydrate 시 Postgres 적재), 크로스노드 RESUME(현재 버퍼가 노드 로컬), 액터까지 도는 완전 결정론 DST 실행기.
 > 참고: PASETO 키는 단일노드는 기동마다 새로 생성됨(재시작 시 기존 토큰 무효) — 운영/멀티노드는 영속 키 필요(D14, env 로드 구현됨).
-> 멀티유저 채팅은 **초대(invites, Phase 3)** 필요. 남은 Phase 1: PoW(D18, Phase 4 가능).
+> 남은 Phase 1: PoW(D18, Phase 4 가능).
 
 ## 5. 작업 중 지킬 것 (요약)
 

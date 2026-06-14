@@ -17,7 +17,7 @@ use protocol::NodeMessage;
 use tokio::sync::{mpsc, oneshot};
 use transport::{Inbound, NodeTransport, TransportError};
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::Clock;
 use crate::membership::Membership;
 use crate::realm::{RealmActor, RealmCommand, RealmEvent};
 use crate::ring::HashRing;
@@ -59,6 +59,8 @@ pub struct Router<T: NodeTransport> {
     ring: HashRing,
     /// 피어 생사 뷰 — down 노드는 소유권 탐색에서 제외(자동 failover, D23).
     membership: Arc<Membership>,
+    /// 주입된 시계 — Realm 액터에 전달. DST에선 SimClock(ManualClock)로 결정론 (D25).
+    clock: Arc<dyn Clock>,
     transport: T,
     events: mpsc::Sender<RealmEvent>,
     local_realms: Mutex<HashMap<u64, Mailbox<RealmCommand>>>,
@@ -66,9 +68,11 @@ pub struct Router<T: NodeTransport> {
 
 impl<T: NodeTransport> Router<T> {
     /// `snowflakes` = 노드당 단일 generator (server가 소유, Router·REST 등에 공유 주입). D11.
+    /// `clock` = 노드 시계(D25) — Realm 액터에 주입. 단일노드는 SystemClock, DST는 SimClock.
     pub fn new(
         local_node_id: u64,
         snowflakes: Arc<SnowflakeGenerator>,
+        clock: Arc<dyn Clock>,
         ring: HashRing,
         transport: T,
         events: mpsc::Sender<RealmEvent>,
@@ -78,6 +82,7 @@ impl<T: NodeTransport> Router<T> {
             snowflakes,
             ring,
             membership: Arc::new(Membership::new()),
+            clock,
             transport,
             events,
             local_realms: Mutex::new(HashMap::new()),
@@ -105,7 +110,7 @@ impl<T: NodeTransport> Router<T> {
                 let actor = RealmActor::new(
                     realm,
                     Arc::clone(&self.snowflakes),
-                    Box::new(SystemClock),
+                    Arc::clone(&self.clock),
                     self.events.clone(),
                 );
                 spawn(actor, 256)
@@ -351,6 +356,9 @@ mod tests {
     fn mkgen(worker: u16) -> Arc<SnowflakeGenerator> {
         Arc::new(SnowflakeGenerator::new(worker))
     }
+    fn clk() -> Arc<dyn Clock> {
+        Arc::new(crate::clock::SystemClock)
+    }
     fn ring_2() -> HashRing {
         let mut r = HashRing::new(100);
         r.add_node(1);
@@ -375,7 +383,7 @@ mod tests {
         let remote_realm = first_realm_owned_by(&ring, 2);
 
         let (etx, _erx) = mpsc::channel(64);
-        let router = Router::new(1, mkgen(1), ring, t1, etx);
+        let router = Router::new(1, mkgen(1), clk(), ring, t1, etx);
 
         assert_eq!(router.route_subscribe(local_realm, uid(0xA), 1).await.unwrap(), Routed::Local);
         assert_eq!(
@@ -395,7 +403,7 @@ mod tests {
         ring.add_node(1);
 
         let (etx, mut erx) = mpsc::channel(64);
-        let router = Router::new(1, mkgen(1), ring, t1, etx);
+        let router = Router::new(1, mkgen(1), clk(), ring, t1, etx);
         let realm = RealmId(Snowflake::from_raw(42));
 
         router.route_subscribe(realm, uid(1), 1).await.unwrap();
@@ -420,8 +428,8 @@ mod tests {
 
         let (etx1, mut erx1) = mpsc::channel(64);
         let (etx2, _erx2) = mpsc::channel(64);
-        let router1 = Router::new(1, mkgen(1), ring_2(), t1, etx1);
-        let router2 = Router::new(2, mkgen(2), ring_2(), t2, etx2);
+        let router1 = Router::new(1, mkgen(1), clk(), ring_2(), t1, etx1);
+        let router2 = Router::new(2, mkgen(2), clk(), ring_2(), t2, etx2);
 
         // A는 노드1(소유)에서 구독 — 로컬
         router1.route_subscribe(realm, uid(0xA), 1).await.unwrap();
@@ -462,7 +470,7 @@ mod tests {
 
         let (etx, mut erx) = mpsc::channel(64);
         // 노드2 관점의 Router.
-        let router2 = Router::new(2, mkgen(2), ring, t2, etx);
+        let router2 = Router::new(2, mkgen(2), clk(), ring, t2, etx);
         assert_eq!(router2.owner(realm), Some(1));
         assert!(!router2.is_local(realm));
 
@@ -507,8 +515,8 @@ mod tests {
 
         let (etx1, mut erx1) = mpsc::channel(64);
         let (etx2, _erx2) = mpsc::channel(64);
-        let router1 = Arc::new(Router::new(1, mkgen(1), ring_2(), t1, etx1));
-        let router2 = Arc::new(Router::new(2, mkgen(2), ring_2(), t2, etx2));
+        let router1 = Arc::new(Router::new(1, mkgen(1), clk(), ring_2(), t1, etx1));
+        let router2 = Arc::new(Router::new(2, mkgen(2), clk(), ring_2(), t2, etx2));
         let realm = first_realm_owned_by(&ring_2(), 1); // 노드1 소유
 
         // 노드1 inbound 루프: 포워딩된 Subscribe 처리.

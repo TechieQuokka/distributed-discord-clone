@@ -5,6 +5,15 @@
 
 ---
 
+## [1.18.0] - 2026-06-14
+### 새 기능
+- **DST 하네스 — SimTransport + SimClock + 시드 카오스** (Phase 2, D25) — 멀티노드 클러스터를 단일 프로세스·가상 시간에서 결정론적으로 재현.
+  - `transport::sim`: `SimNetwork`(가상 시계 + 시간순 BinaryHeap 스케줄 + 노드별 ready 큐), `SimTransport`(`NodeTransport`; `send`는 즉시 큐 적재), `DetRng`(splitmix64 시드 PRNG). 카오스: 지연(min/max_latency_ms)·유실(drop_prob)·파티션(partition/heal). 하네스 API: `advance_to`/`advance`/`next_event_time`/`take_inbound`/`dropped`. 테스트 +5(지연 보류, 동일시드 동일순서, 전량 유실, 파티션 격리, 미지 노드).
+  - `node`: `Router`·`RealmActor`가 `Arc<dyn Clock>` **주입**받음(하드코딩 SystemClock 제거) → DST에서 Snowflake id까지 결정론(D11/D25). `Router::new` 시그니처에 clock 추가(server·테스트 갱신).
+  - `node/tests/dst.rs`: 하네스 e2e — 동일 시드 2회 동일 결과(메시지 id+배달) 재현성, 노드2 파티션 시 팬아웃 유실. SimClock=`ManualClock`.
+  - 후속: 액터까지 단일스레드 가상 실행기로 돌리는 완전 결정론(현재 네트워크 경로만 가상시간). transport 1.0.0→1.1.0, node 1.1.0→1.2.0.
+- 문서: decisions D25(구현), TODO Phase 2 DST 체크. **Phase 2 분산 활성화 전 항목 완료.**
+
 ## [1.17.0] - 2026-06-14
 ### 새 기능
 - **Backpressure — 느린 WS 클라 끊기 정책** (Phase 2, D27) — 채널 가득 시 침묵 드롭 대신 연결을 끊어 RESUME 복구 유도.
