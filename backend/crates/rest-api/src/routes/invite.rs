@@ -78,10 +78,8 @@ async fn create_invite<S: Store + 'static>(
     if req.max_uses < 0 || req.max_age < 0 {
         return Err(ApiError::BadRequest("max_uses/max_age must be >= 0".into()));
     }
-    // 멤버만 초대 생성 가능.
-    if !st.store.is_member(realm_id, user).await? {
-        return Err(ApiError::Forbidden);
-    }
+    // 초대 생성은 CREATE_INVITE 필요 (@everyone 기본 포함, D17).
+    crate::perm::require(&*st.store, realm_id, user, domain::permissions::Permissions::CREATE_INVITE).await?;
 
     let now_unix = (st.clock.now_ms() / 1000) as i64;
     let expires_at = (req.max_age > 0).then(|| now_unix + req.max_age);

@@ -3,11 +3,12 @@
 use core::future::Future;
 
 use crate::channel::{Channel, NewChannel};
-use crate::guild::NewGuild;
-use crate::id::{ChannelId, MessageId, RealmId, RefreshTokenId, UserId};
+use crate::guild::{Guild, NewGuild};
+use crate::id::{ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, UserId};
 use crate::invite::{Invite, NewInvite};
 use crate::message::{Message, NewMessage};
 use crate::refresh_token::{NewRefreshToken, RefreshToken};
+use crate::role::{NewRole, Role};
 use crate::user::{NewUser, User};
 
 #[derive(Debug, thiserror::Error)]
@@ -66,9 +67,15 @@ pub trait RefreshTokenRepository: Send + Sync {
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
 }
 
-/// 길드/멤버십 저장소 port (DB-D1). 길드 = realm+guild+member 한 트랜잭션.
+/// 길드/멤버십 저장소 port (DB-D1). 길드 = realm+guild+member(+@everyone 역할) 한 트랜잭션.
 pub trait GuildRepository: Send + Sync {
     fn create_guild(&self, guild: &NewGuild) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 권한 검사용: 길드(owner_id 포함) 조회. realm이 길드가 아니면 None.
+    fn get_guild(
+        &self,
+        realm_id: RealmId,
+    ) -> impl Future<Output = Result<Option<Guild>, RepoError>> + Send;
 
     fn add_member(
         &self,
@@ -107,6 +114,37 @@ pub trait InviteRepository: Send + Sync {
         user: UserId,
         now_unix: i64,
     ) -> impl Future<Output = Result<Option<RealmId>, RepoError>> + Send;
+}
+
+/// 역할 저장소 port (D17). @everyone(id==realm_id) + 멤버 역할 할당.
+pub trait RoleRepository: Send + Sync {
+    fn create_role(&self, role: &NewRole) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    fn list_roles(
+        &self,
+        realm_id: RealmId,
+    ) -> impl Future<Output = Result<Vec<Role>, RepoError>> + Send;
+
+    /// 멤버에게 역할 부여 (멱등). 멤버·역할이 존재해야 함.
+    fn assign_role(
+        &self,
+        realm_id: RealmId,
+        user_id: UserId,
+        role_id: RoleId,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// `@everyone`(id==realm_id) 역할의 권한 비트. 없으면 None.
+    fn everyone_permissions(
+        &self,
+        realm_id: RealmId,
+    ) -> impl Future<Output = Result<Option<u64>, RepoError>> + Send;
+
+    /// 멤버에게 할당된 (비-@everyone) 역할들의 권한 비트 목록.
+    fn member_role_permissions(
+        &self,
+        realm_id: RealmId,
+        user_id: UserId,
+    ) -> impl Future<Output = Result<Vec<u64>, RepoError>> + Send;
 }
 
 /// 채널 저장소 port.
@@ -149,6 +187,7 @@ pub trait Store:
     UserRepository
     + RefreshTokenRepository
     + GuildRepository
+    + RoleRepository
     + InviteRepository
     + ChannelRepository
     + MessageRepository
@@ -159,6 +198,7 @@ impl<T> Store for T where
     T: UserRepository
         + RefreshTokenRepository
         + GuildRepository
+        + RoleRepository
         + InviteRepository
         + ChannelRepository
         + MessageRepository

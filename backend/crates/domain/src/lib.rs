@@ -12,4 +12,5 @@ pub mod message;
 pub mod permissions;
 pub mod refresh_token;
 pub mod repo;
+pub mod role;
 pub mod user;

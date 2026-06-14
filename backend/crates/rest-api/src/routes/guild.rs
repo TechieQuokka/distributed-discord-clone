@@ -104,10 +104,8 @@ async fn create_channel<S: Store + 'static>(
     if name.is_empty() {
         return Err(ApiError::BadRequest("channel name is required".into()));
     }
-    // 멤버만 채널 생성 가능.
-    if !st.store.is_member(realm_id, user).await? {
-        return Err(ApiError::Forbidden);
-    }
+    // 채널 생성은 MANAGE_CHANNELS 필요 (D17).
+    crate::perm::require(&*st.store, realm_id, user, domain::permissions::Permissions::MANAGE_CHANNELS).await?;
 
     let id = ChannelId(st.snowflakes.next(st.clock.now_ms()));
     st.store

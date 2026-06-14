@@ -5,6 +5,17 @@
 
 ---
 
+## [1.20.0] - 2026-06-14
+### 새 기능
+- **역할/권한 (D17) — 비트마스크 + DB 역할 + 강제** (Phase 3) — @everyone 기본 + 커스텀 역할로 행동 게이팅. 2유저 라이브 검증.
+  - `domain`: `role::{Role,NewRole}`(@everyone=id==realm 규약) + `permissions::default_everyone`/`compute_guild_permissions` + `RoleRepository` port + `GuildRepository::get_guild` → `Store` 합류.
+  - `storage`: **V5 `0005_roles.sql`**(roles + member_roles). 길드 생성 트랜잭션에 `@everyone` 역할 자동 삽입. RoleRepository 구현 + get_guild. DB 통합 테스트 +1(역할 할당 전후 유효권한).
+  - `rest-api`: `perm::{effective,require}`(DB→domain 계산). 역할 라우트(`POST/GET /guilds/:id/roles`, `PUT /guilds/:id/members/:uid/roles/:rid`, MANAGE_ROLES+권한상승 방지). 강제 추가: 채널생성 MANAGE_CHANNELS·초대 CREATE_INVITE.
+  - `gateway`: 메시지 전송에 `can_send`(SEND_MESSAGES) 강제(이전 is_member 대체). owner/Administrator 단축.
+  - `cli`: `create-channel`/`create-role`/`assign-role`.
+  - **라이브 e2e**: bob(@everyone)→create-channel 403 → alice가 MANAGE_CHANNELS 역할 생성·부여 → bob create-channel 성공. domain/storage/rest-api 1.1→1.2, gateway 1.2→1.3, cli 1.1→1.2.
+- 문서: decisions D17(구현), TODO 체크(채널 오버라이드는 다음). 채널 오버라이드 계산은 domain에 이미 존재(저장·로딩만 후속).
+
 ## [1.19.0] - 2026-06-14
 ### 새 기능
 - **초대(invites) — 멀티유저 합류** (Phase 3 시작) — 초대 코드로 길드 합류 → 자동구독(D13) → 크로스유저 팬아웃. 2유저 라이브 검증 완료.

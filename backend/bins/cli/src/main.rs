@@ -26,6 +26,12 @@ enum Command {
     Refresh(RefreshArgs),
     /// 길드 생성 (기본 'general' 채널 포함).
     CreateGuild(CreateGuildArgs),
+    /// 텍스트 채널 생성 (MANAGE_CHANNELS 필요).
+    CreateChannel(CreateChannelArgs),
+    /// 역할 생성 (MANAGE_ROLES 필요). --permissions = raw u64 비트마스크.
+    CreateRole(CreateRoleArgs),
+    /// 멤버에게 역할 부여 (MANAGE_ROLES 필요).
+    AssignRole(AssignRoleArgs),
     /// 길드 초대 코드 생성 (멤버 전용).
     CreateInvite(CreateInviteArgs),
     /// 초대 코드로 길드 합류.
@@ -65,6 +71,38 @@ struct CreateGuildArgs {
     token: String,
     #[arg(long)]
     name: String,
+}
+#[derive(Args)]
+struct CreateChannelArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    name: String,
+}
+#[derive(Args)]
+struct CreateRoleArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    name: String,
+    /// 권한 비트마스크 (raw u64). 예: MANAGE_CHANNELS=16.
+    #[arg(long, default_value_t = 0)]
+    permissions: u64,
+}
+#[derive(Args)]
+struct AssignRoleArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    user: String,
+    #[arg(long)]
+    role: String,
 }
 #[derive(Args)]
 struct CreateInviteArgs {
@@ -137,6 +175,15 @@ async fn main() -> std::process::ExitCode {
                 println!("  channel  = {} ({})", c.id, c.name.clone().unwrap_or_default());
             }
         }),
+        Command::CreateChannel(a) => rest::create_channel(&base, &a.token, &a.guild, &a.name).await.map(|c| {
+            println!("✅ channel created: {} ({})", c.id, c.name.clone().unwrap_or_default());
+        }),
+        Command::CreateRole(a) => rest::create_role(&base, &a.token, &a.guild, &a.name, a.permissions).await.map(|r| {
+            println!("✅ role created: {} ({}) perms={}", r.id, r.name, r.permissions);
+        }),
+        Command::AssignRole(a) => rest::assign_role(&base, &a.token, &a.guild, &a.user, &a.role)
+            .await
+            .map(|_| println!("✅ role {} assigned to {}", a.role, a.user)),
         Command::CreateInvite(a) => rest::create_invite(&base, &a.token, &a.guild, a.max_uses, a.max_age)
             .await
             .map(|inv| {

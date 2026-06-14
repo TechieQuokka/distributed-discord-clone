@@ -9,6 +9,7 @@ pub mod invite;
 pub mod message;
 pub mod pool;
 pub mod refresh_token;
+pub mod role;
 pub mod store;
 pub mod user;
 

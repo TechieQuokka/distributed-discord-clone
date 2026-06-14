@@ -123,6 +123,58 @@ pub async fn create_guild(base: &str, token: &str, name: &str) -> Result<GuildVi
     ok_json(res).await
 }
 
+#[derive(Deserialize)]
+pub struct RoleView {
+    pub id: String,
+    pub name: String,
+    pub permissions: String,
+    #[allow(dead_code)]
+    pub position: i32,
+}
+
+pub async fn create_channel(base: &str, token: &str, guild: &str, name: &str) -> Result<ChannelView, String> {
+    let res = client()
+        .post(format!("{base}/guilds/{guild}/channels"))
+        .bearer_auth(token)
+        .json(&NameBody { name })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Serialize)]
+struct CreateRoleBody<'a> {
+    name: &'a str,
+    permissions: u64,
+}
+
+pub async fn create_role(base: &str, token: &str, guild: &str, name: &str, permissions: u64) -> Result<RoleView, String> {
+    let res = client()
+        .post(format!("{base}/guilds/{guild}/roles"))
+        .bearer_auth(token)
+        .json(&CreateRoleBody { name, permissions })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+pub async fn assign_role(base: &str, token: &str, guild: &str, user: &str, role: &str) -> Result<(), String> {
+    let res = client()
+        .put(format!("{base}/guilds/{guild}/members/{user}/roles/{role}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{status}: {}", res.text().await.unwrap_or_default()))
+    }
+}
+
 #[derive(Serialize)]
 struct CreateInviteBody {
     max_uses: i32,
