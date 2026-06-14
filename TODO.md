@@ -62,7 +62,7 @@
 - [x] Realm 2단 라우팅 (세션 소유 vs Realm 소유, D9)  # router: 소유판정+로컬/원격 subscribe·send + 크로스노드 fanout
 - [x] Realm-local 구독자 추적 + 팬아웃 (D12)  # 구독자표 + RealmFanout 와이어 크로스노드 배달 (in-process stub 상에서)
 - [x] Gateway RESUME — per-session seq + 재생 버퍼 (D24)  # Hub 영속 세션상태(seq+bounded버퍼+CSPRNG resume_token), detach/grace/replay/RESUMED, gap→INVALID
-- [ ] Realm 상태 rehydrate (노드 재배치, D23)
+- [x] Realm 상태 rehydrate (노드 재배치, D23)  # PING/PONG 생사판정(Membership)+owner_excluding failover; 새 소유 노드 actor fresh-spawn(Postgres 진실 보존). D35 캐시 warmup은 후속
 - [ ] Backpressure — bounded 채널 + 느린 클라 끊기 (D27)
 - [ ] **DST 하네스** — SimTransport + SimClock (D25)
 

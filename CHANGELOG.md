@@ -5,6 +5,17 @@
 
 ---
 
+## [1.16.0] - 2026-06-14
+### 새 기능
+- **PING/PONG 생사 판정 + Realm 소유권 failover (rehydrate)** (Phase 2, D23) — 소유 노드 사망 시 Realm이 다음 살아있는 노드로 자동 이동.
+  - `node::membership::Membership`: 피어 생사 뷰(`record_seen`/`mark_down`/`is_down`/`down_set`/`sweep`). 시간은 주입 clock(ms)로 다뤄 DST/테스트 결정론(D25).
+  - `node::ring::HashRing::owner_excluding`: down 노드를 건너뛴 일관 해싱 소유권(영향 받는 Realm만 이동). `owner`는 이를 통해 membership down_set 소비.
+  - `node::router`: `Router`에 `Membership` 보유 + `membership()` 노출. `handle_inbound`가 PING→PONG 회신, PONG/HELLO는 무처리(수신=liveness). `run_failure_detector`(주기 PING + sweep) 추가.
+  - `server`: 멀티노드 시 failure detector spawn(interval 1s/timeout 3s) + inbound 루프가 `record_seen`(주입 clock)으로 liveness 갱신.
+  - rehydrate: 새 소유 노드는 액터를 fresh-spawn(현재 액터 상태=휘발 구독자표 D12). 메시지 진실은 Postgres에 이미 persist(D24)되어 유실 없음. D35 캐시 warmup은 후속 seam.
+  - 테스트 +6: membership sweep/recover·record_seen, ring failover(영향 Realm만 이동·전부 down→None), router 소유권 failover+복귀. node 1.0.0→1.1.0.
+- 문서: decisions D23(구현), TODO Phase 2 rehydrate 체크.
+
 ## [1.15.0] - 2026-06-14
 ### 새 기능
 - **Gateway RESUME — per-session seq + 재생 버퍼 완성** (Phase 2, D24/D20) — 끊긴 세션을 놓친 이벤트와 함께 재개.

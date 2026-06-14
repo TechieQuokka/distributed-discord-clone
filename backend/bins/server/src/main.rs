@@ -103,8 +103,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 수신: 원격 RealmSend→로컬 액터 / 원격 RealmFanout→로컬 세션 배달.
         let router2 = Arc::clone(&router);
         let hub2 = hub.clone();
-        tokio::spawn(run_inbound(inbound_rx, router2, hub2));
-        info!(node_id, listen = %c.node.listen_addr, peers = c.peers.len(), "node mesh active (mTLS)");
+        tokio::spawn(run_inbound(inbound_rx, router2, hub2, Arc::clone(&clock)));
+
+        // PING/PONG 생사 판정 (D23): 피어 down → 링 failover. interval 1s / timeout 3s.
+        let peer_ids: Vec<u64> = c.peers.iter().map(|p| p.id).collect();
+        tokio::spawn(node::run_failure_detector(
+            transport.clone(),
+            Arc::clone(router.membership()),
+            peer_ids,
+            Arc::clone(&clock),
+            1_000,
+            3_000,
+        ));
+        info!(node_id, listen = %c.node.listen_addr, peers = c.peers.len(), "node mesh active (mTLS) + failure detector");
     } else {
         info!(node_id, "single-node mode (no cluster config)");
     }
@@ -137,12 +148,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 원격 노드 메시지 처리 루프 (Phase 2 크로스노드 배달).
+/// 모든 인바운드는 그 자체로 피어 liveness 증거 → `record_seen`으로 생사 뷰 갱신 (D23).
 async fn run_inbound(
     mut rx: mpsc::Receiver<Inbound>,
     router: Arc<Router<TcpTransport>>,
     hub: Hub,
+    clock: Arc<dyn Clock>,
 ) {
     while let Some(inbound) = rx.recv().await {
+        router.membership().record_seen(inbound.src, clock.now_ms());
         match router.handle_inbound(inbound).await {
             Ok(Some(delivery)) => gateway::deliver_local(&hub, &delivery).await,
             Ok(None) => {}

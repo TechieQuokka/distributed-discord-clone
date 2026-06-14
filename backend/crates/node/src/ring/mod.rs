@@ -49,15 +49,27 @@ impl HashRing {
 
     /// Realm의 소유 노드 = 해시 이상(>=)인 첫 vnode, 없으면 wrap-around.
     pub fn owner(&self, realm_id: u64) -> Option<u64> {
+        self.owner_excluding(realm_id, &std::collections::HashSet::new())
+    }
+
+    /// `excluded`(down 노드, D23)를 건너뛴 소유 노드. 링을 해시 위치부터 한 바퀴 돌며
+    /// 제외되지 않은 첫 노드를 반환 → down 노드의 Realm만 다음 살아있는 노드로 이동(일관 해싱).
+    /// 모든 노드가 제외되면 None.
+    pub fn owner_excluding(
+        &self,
+        realm_id: u64,
+        excluded: &std::collections::HashSet<u64>,
+    ) -> Option<u64> {
         if self.ring.is_empty() {
             return None;
         }
         let h = hash_realm(realm_id);
+        // 해시 이상 → 처음부터 (wrap) 순서로 vnode를 훑어 첫 alive 노드.
         self.ring
             .range(h..)
-            .next()
+            .chain(self.ring.range(..h))
             .map(|(_, &node)| node)
-            .or_else(|| self.ring.values().next().copied())
+            .find(|node| !excluded.contains(node))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -105,6 +117,27 @@ mod tests {
         for (_, c) in counts {
             assert!(c > 500, "uneven distribution: {c}");
         }
+    }
+
+    #[test]
+    fn excluding_down_node_shifts_only_its_realms() {
+        let mut r = HashRing::new(150);
+        for n in [1u64, 2, 3] {
+            r.add_node(n);
+        }
+        let down: std::collections::HashSet<u64> = [3].into_iter().collect();
+        for realm in 0..3000u64 {
+            let normal = r.owner(realm).unwrap();
+            let failover = r.owner_excluding(realm, &down).unwrap();
+            assert_ne!(failover, 3, "down 노드가 여전히 소유");
+            if normal != 3 {
+                // 영향 없는 Realm은 소유 유지 (일관 해싱)
+                assert_eq!(failover, normal, "realm {realm}이 불필요하게 이동");
+            }
+        }
+        // 모든 노드 down → 소유 없음.
+        let all: std::collections::HashSet<u64> = [1, 2, 3].into_iter().collect();
+        assert_eq!(r.owner_excluding(0, &all), None);
     }
 
     #[test]

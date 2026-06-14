@@ -17,7 +17,8 @@ use protocol::NodeMessage;
 use tokio::sync::{mpsc, oneshot};
 use transport::{Inbound, NodeTransport, TransportError};
 
-use crate::clock::SystemClock;
+use crate::clock::{Clock, SystemClock};
+use crate::membership::Membership;
 use crate::realm::{RealmActor, RealmCommand, RealmEvent};
 use crate::ring::HashRing;
 
@@ -56,6 +57,8 @@ pub struct Router<T: NodeTransport> {
     /// 노드당 단일 Snowflake generator — 모든 Realm 액터에 주입 (D11 불변식).
     snowflakes: Arc<SnowflakeGenerator>,
     ring: HashRing,
+    /// 피어 생사 뷰 — down 노드는 소유권 탐색에서 제외(자동 failover, D23).
+    membership: Arc<Membership>,
     transport: T,
     events: mpsc::Sender<RealmEvent>,
     local_realms: Mutex<HashMap<u64, Mailbox<RealmCommand>>>,
@@ -74,14 +77,21 @@ impl<T: NodeTransport> Router<T> {
             local_node_id,
             snowflakes,
             ring,
+            membership: Arc::new(Membership::new()),
             transport,
             events,
             local_realms: Mutex::new(HashMap::new()),
         }
     }
 
+    /// 공유 생사 뷰 — server의 failure detector 루프가 갱신, owner가 소비 (D23).
+    pub fn membership(&self) -> &Arc<Membership> {
+        &self.membership
+    }
+
+    /// Realm 소유 노드 — down 노드(D23)를 건너뛴 일관 해싱 소유권.
     pub fn owner(&self, realm: RealmId) -> Option<u64> {
-        self.ring.owner(realm.0.raw())
+        self.ring.owner_excluding(realm.0.raw(), &self.membership.down_set())
     }
 
     pub fn is_local(&self, realm: RealmId) -> bool {
@@ -292,9 +302,41 @@ impl<T: NodeTransport> Router<T> {
                 nonce,
                 user_ids,
             })),
-            // Hello/Ping 등 제어 메시지는 별도 핸들러 (후속)
-            _ => Ok(None),
+            // 생사 판정 (D23): PING 받으면 PONG 회신. 수신 시각 기록은 server inbound 루프가
+            // 주입된 clock으로 수행(Router는 clock-free 유지). PONG/HELLO는 수신 자체가 liveness.
+            NodeMessage::Ping => {
+                self.transport.send(inbound.src, NodeMessage::Pong).await?;
+                Ok(None)
+            }
+            NodeMessage::Pong | NodeMessage::Hello { .. } | NodeMessage::HelloAck { .. } => Ok(None),
         }
+    }
+}
+
+/// PING/PONG failure detector 루프 (D23). server가 `tokio::spawn`.
+/// 주기적으로 각 피어에 PING 송신 + `Membership::sweep`로 timeout 초과 피어를 down 처리.
+/// PONG/임의 트래픽 수신 시각은 server inbound 루프가 `record_seen`으로 갱신.
+pub async fn run_failure_detector<T: NodeTransport>(
+    transport: T,
+    membership: Arc<Membership>,
+    peers: Vec<u64>,
+    clock: Arc<dyn Clock>,
+    interval_ms: u64,
+    timeout_ms: u64,
+) {
+    // 시작 시 grace: 아직 PONG 전이라도 즉시 down 판정되지 않도록 seed.
+    let now = clock.now_ms();
+    for &p in &peers {
+        membership.record_seen(p, now);
+    }
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        for &p in &peers {
+            let _ = transport.send(p, NodeMessage::Ping).await; // 미연결이면 무시(이후 sweep이 down).
+        }
+        membership.sweep(&peers, clock.now_ms(), timeout_ms);
     }
 }
 
@@ -407,6 +449,38 @@ mod tests {
         let delivery = router2.handle_inbound(fan).await.unwrap().unwrap();
         assert_eq!(delivery.user_ids, vec![0xB]);
         assert_eq!(delivery.content, "hi");
+    }
+
+    /// 생사 판정 → 소유권 failover (D23): 소유 노드가 down으로 표시되면 다음 살아있는 노드가
+    /// 그 Realm을 소유 → 새 소유 노드에서 로컬 전송이 동작(액터 fresh-spawn = rehydrate).
+    #[tokio::test]
+    async fn owner_fails_over_when_node_marked_down() {
+        let board = Switchboard::new();
+        let (t2, _r2) = board.join(2, 16);
+        let ring = ring_2();
+        let realm = first_realm_owned_by(&ring, 1); // 평소 노드1 소유
+
+        let (etx, mut erx) = mpsc::channel(64);
+        // 노드2 관점의 Router.
+        let router2 = Router::new(2, mkgen(2), ring, t2, etx);
+        assert_eq!(router2.owner(realm), Some(1));
+        assert!(!router2.is_local(realm));
+
+        // 노드1 down 판정 → 소유권이 노드2로 이동.
+        router2.membership().mark_down(1);
+        assert_eq!(router2.owner(realm), Some(2));
+        assert!(router2.is_local(realm), "failover 후 노드2가 소유");
+
+        // 새 소유 노드에서 로컬 전송이 동작(액터가 새로 떠서 rehydrate).
+        let chan = ChannelId(Snowflake::from_raw(0xC0));
+        router2.route_subscribe(realm, uid(0xB), 2).await.unwrap();
+        router2.route_send_local(realm, chan, uid(0xB), "after-failover".into(), None).await.unwrap();
+        let RealmEvent::MessageCreated { content, .. } = erx.recv().await.unwrap();
+        assert_eq!(content, "after-failover");
+
+        // 노드1 복귀 → 소유권 환원(일관 해싱 re-join).
+        router2.membership().record_seen(1, 1);
+        assert_eq!(router2.owner(realm), Some(1));
     }
 
     /// Phase 2 종단: **실제 raw-TCP+mTLS 전송** 위에서 두 노드 크로스노드 팬아웃 (D3/D16).

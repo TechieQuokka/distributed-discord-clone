@@ -192,6 +192,13 @@
 - **Postgres = 진실의 원천. Realm 액터 인메모리 상태 = 재구축 가능 캐시(write-through).** 메시지는 append-only 저장.
 - 노드 사망 → consistent hashing 재배치 → 새 노드가 Postgres에서 **rehydrate** → 죽은 노드 세션 끊김 → 클라가 다른 노드로 RESUME 재연결.
 - 이벤트 소싱은 Phase 5 스트레치 후보.
+- **구현(Phase 2)**: `node::membership::Membership` + `run_failure_detector` — 피어에 주기 PING(1s),
+  PONG/임의 트래픽 수신 시 `record_seen`, `timeout`(3s) 초과 시 down. `Router::owner`는 `HashRing::owner_excluding`로
+  **down 노드를 건너뛴 일관 해싱 소유권** → 소유 노드가 죽으면 다음 살아있는 노드가 그 Realm을 자동 소유(failover).
+  새 소유 노드는 첫 트래픽에서 RealmActor를 **새로 spawn**(lazy)한다 — 현재 액터 상태는 휘발성 구독자표(D12, DB-D5)
+  뿐이라 rehydrate = fresh-spawn + 클라 재연결 시 자동 재구독(D13)으로 충분. **메시지 진실은 Postgres에 persist-then-fanout(D24)로
+  이미 보존**되어 유실 없음(히스토리는 REST 조회). **D35 최근메시지 캐시 warmup**(Postgres 적재)은 캐시 도입 시 같은 자리에 들어갈 후속 seam.
+  노드 복귀(record_seen) 시 소유권 환원(re-join). ※ DST(D25)에선 주입 clock 기준 결정론 재현.
 
 ### D24. 전달/순서 보장
 - **순서**: Realm 액터 단일 소유 → Realm 내 전순서 무료 보장. 전역 순서는 미보장.
