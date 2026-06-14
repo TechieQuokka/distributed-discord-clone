@@ -5,6 +5,16 @@
 
 ---
 
+## [1.19.0] - 2026-06-14
+### 새 기능
+- **초대(invites) — 멀티유저 합류** (Phase 3 시작) — 초대 코드로 길드 합류 → 자동구독(D13) → 크로스유저 팬아웃. 2유저 라이브 검증 완료.
+  - `domain`: `invite::{Invite, NewInvite}`(+`is_valid`) 엔티티 + `InviteRepository` port(create/find/redeem) → `Store` 슈퍼트레잇에 합류. 테스트 +2.
+  - `storage`: `PgStore` invite 구현 + **V4 `0004_invites.sql`**(청사진 스키마와 일치). `redeem_invite`는 **한 트랜잭션**(행 `FOR UPDATE` → 만료/소진 검사 → 멤버 멱등 삽입 → uses++). DB 통합 테스트 +1(생성·redeem·멱등·소진·만료·미존재).
+  - `rest-api`: `POST /guilds/:id/invites`(멤버 전용 생성, base62 8자 CSPRNG 코드) + `POST /invites/:code`(redeem→멤버 추가→채널목록). `rand` 의존 추가.
+  - `cli`: `create-invite`/`join` 서브커맨드 + rest 헬퍼.
+  - **라이브 e2e**: alice 길드 생성→초대 발급, bob join→READY가 그 길드 멤버로 표시→alice 전송 시 bob WS가 MESSAGE_CREATE(s=2) 수신. domain/storage/rest-api/cli 1.0.0→1.1.0.
+- 문서: TODO Phase 3 invites 체크. (스키마 `invites`는 청사진에 기존재 — 구현이 그에 일치.)
+
 ## [1.18.0] - 2026-06-14
 ### 새 기능
 - **DST 하네스 — SimTransport + SimClock + 시드 카오스** (Phase 2, D25) — 멀티노드 클러스터를 단일 프로세스·가상 시간에서 결정론적으로 재현.

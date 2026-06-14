@@ -7,6 +7,7 @@ pub mod channel;
 pub mod error;
 pub mod guild;
 pub mod id;
+pub mod invite;
 pub mod message;
 pub mod permissions;
 pub mod refresh_token;

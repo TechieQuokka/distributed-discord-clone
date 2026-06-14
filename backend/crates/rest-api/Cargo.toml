@@ -1,6 +1,6 @@
 [package]
 name = "rest-api"
-version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+version = "1.1.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
 edition = "2024"
 license = "MIT"
 
@@ -9,6 +9,7 @@ auth = { version = "1.0.0", path = "../auth" }
 axum = "0.8.9"
 domain = { path = "../domain" }
 node = { path = "../node" }
+rand = "0.10.1"
 serde = { version = "1.0.228", features = ["derive"] }
 storage = { path = "../storage" }
 tokio = { version = "1.52.3", features = ["rt", "macros"] }

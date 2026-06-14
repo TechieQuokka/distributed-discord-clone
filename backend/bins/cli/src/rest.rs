@@ -24,6 +24,26 @@ pub struct GuildView {
     pub channels: Vec<ChannelView>,
 }
 
+#[derive(Deserialize)]
+pub struct InviteView {
+    pub code: String,
+    pub realm_id: String,
+    pub max_uses: i32,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct JoinView {
+    pub realm_id: String,
+    pub channels: Vec<ChannelEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct ChannelEntry {
+    pub id: String,
+    pub name: Option<String>,
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
@@ -97,6 +117,39 @@ pub async fn create_guild(base: &str, token: &str, name: &str) -> Result<GuildVi
         .post(format!("{base}/guilds"))
         .bearer_auth(token)
         .json(&NameBody { name })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Serialize)]
+struct CreateInviteBody {
+    max_uses: i32,
+    max_age: i64,
+}
+
+pub async fn create_invite(
+    base: &str,
+    token: &str,
+    realm_id: &str,
+    max_uses: i32,
+    max_age: i64,
+) -> Result<InviteView, String> {
+    let res = client()
+        .post(format!("{base}/guilds/{realm_id}/invites"))
+        .bearer_auth(token)
+        .json(&CreateInviteBody { max_uses, max_age })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+pub async fn join_invite(base: &str, token: &str, code: &str) -> Result<JoinView, String> {
+    let res = client()
+        .post(format!("{base}/invites/{code}"))
+        .bearer_auth(token)
         .send()
         .await
         .map_err(|e| e.to_string())?;
