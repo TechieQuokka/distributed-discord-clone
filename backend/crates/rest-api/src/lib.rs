@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod extract;
+pub mod perm;
 pub mod routes;
 pub mod state;
 

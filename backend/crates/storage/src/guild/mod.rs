@@ -2,8 +2,9 @@
 //!
 //! 길드 생성 = realms + guilds + 소유자 members 한 트랜잭션(원자성).
 
-use domain::guild::NewGuild;
+use domain::guild::{Guild, NewGuild};
 use domain::id::{RealmId, Snowflake, UserId};
+use domain::permissions::Permissions;
 use domain::repo::{GuildRepository, RepoError};
 use sqlx::Row;
 
@@ -28,6 +29,14 @@ impl GuildRepository for PgStore {
             .await
             .map_err(map_err)?;
 
+        // @everyone 역할 (id == realm_id 규약, D17). 모든 멤버가 암묵 보유.
+        sqlx::query("INSERT INTO roles (id, realm_id, name, permissions) VALUES ($1, $1, '@everyone', $2)")
+            .bind(g.realm_id.0.raw() as i64)
+            .bind(Permissions::default_everyone().bits() as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+
         sqlx::query("INSERT INTO members (realm_id, user_id) VALUES ($1, $2)")
             .bind(g.realm_id.0.raw() as i64)
             .bind(g.owner_id.0.raw() as i64)
@@ -37,6 +46,19 @@ impl GuildRepository for PgStore {
 
         tx.commit().await.map_err(map_err)?;
         Ok(())
+    }
+
+    async fn get_guild(&self, realm_id: RealmId) -> Result<Option<Guild>, RepoError> {
+        let row = sqlx::query("SELECT name, owner_id FROM guilds WHERE realm_id = $1")
+            .bind(realm_id.0.raw() as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(row.map(|r| Guild {
+            realm_id,
+            name: r.get("name"),
+            owner_id: UserId(Snowflake::from_raw(r.get::<i64, _>("owner_id") as u64)),
+        }))
     }
 
     async fn add_member(&self, realm_id: RealmId, user_id: UserId) -> Result<(), RepoError> {

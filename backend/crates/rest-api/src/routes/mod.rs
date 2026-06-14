@@ -4,6 +4,7 @@ pub mod auth;
 pub mod guild;
 pub mod invite;
 pub mod message;
+pub mod role;
 
 use domain::repo::Store;
 
@@ -15,6 +16,7 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(auth::routes::<S>())
         .merge(guild::routes::<S>())
         .merge(invite::routes::<S>())
+        .merge(role::routes::<S>())
         .merge(message::routes::<S>())
         .with_state(state)
 }

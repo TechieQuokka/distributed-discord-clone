@@ -52,6 +52,35 @@ impl Permissions {
     pub fn apply(self, ow: Overwrite) -> Self {
         (self & !ow.deny) | ow.allow
     }
+
+    /// 새 길드 생성 시 `@everyone` 역할의 기본 권한 (일반 멤버가 채팅·참여 가능한 최소 세트).
+    pub fn default_everyone() -> Self {
+        Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::ADD_REACTIONS
+            | Permissions::CREATE_INVITE
+            | Permissions::CHANGE_NICKNAME
+            | Permissions::CONNECT
+            | Permissions::SPEAK
+    }
+}
+
+/// 길드(채널 무관) 유효 권한 (D17). 채널 오버라이드 없이 @everyone + 역할 OR + Admin/owner 단축.
+/// 채널 컨텍스트는 [`compute_channel_permissions`]를 쓴다.
+pub fn compute_guild_permissions(
+    is_owner: bool,
+    everyone: Permissions,
+    roles: &[Permissions],
+) -> Permissions {
+    compute_channel_permissions(
+        is_owner,
+        everyone,
+        roles,
+        Overwrite::default(),
+        &[],
+        Overwrite::default(),
+    )
 }
 
 /// 채널 컨텍스트 유효 권한 계산 (D17).
