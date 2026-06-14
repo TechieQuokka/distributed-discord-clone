@@ -5,6 +5,43 @@
 
 ---
 
+## [1.18.0] - 2026-06-14
+### 새 기능
+- **DST 하네스 — SimTransport + SimClock + 시드 카오스** (Phase 2, D25) — 멀티노드 클러스터를 단일 프로세스·가상 시간에서 결정론적으로 재현.
+  - `transport::sim`: `SimNetwork`(가상 시계 + 시간순 BinaryHeap 스케줄 + 노드별 ready 큐), `SimTransport`(`NodeTransport`; `send`는 즉시 큐 적재), `DetRng`(splitmix64 시드 PRNG). 카오스: 지연(min/max_latency_ms)·유실(drop_prob)·파티션(partition/heal). 하네스 API: `advance_to`/`advance`/`next_event_time`/`take_inbound`/`dropped`. 테스트 +5(지연 보류, 동일시드 동일순서, 전량 유실, 파티션 격리, 미지 노드).
+  - `node`: `Router`·`RealmActor`가 `Arc<dyn Clock>` **주입**받음(하드코딩 SystemClock 제거) → DST에서 Snowflake id까지 결정론(D11/D25). `Router::new` 시그니처에 clock 추가(server·테스트 갱신).
+  - `node/tests/dst.rs`: 하네스 e2e — 동일 시드 2회 동일 결과(메시지 id+배달) 재현성, 노드2 파티션 시 팬아웃 유실. SimClock=`ManualClock`.
+  - 후속: 액터까지 단일스레드 가상 실행기로 돌리는 완전 결정론(현재 네트워크 경로만 가상시간). transport 1.0.0→1.1.0, node 1.1.0→1.2.0.
+- 문서: decisions D25(구현), TODO Phase 2 DST 체크. **Phase 2 분산 활성화 전 항목 완료.**
+
+## [1.17.0] - 2026-06-14
+### 새 기능
+- **Backpressure — 느린 WS 클라 끊기 정책** (Phase 2, D27) — 채널 가득 시 침묵 드롭 대신 연결을 끊어 RESUME 복구 유도.
+  - `gateway::hub`: `SessionEntry::push_live` — `try_send` 실패(느린 클라로 채널 가득/닫힘) 시 **live sender drop** → 세션 채널이 닫혀 `pump` 종료·소켓 close. 프레임은 재생 버퍼에 남아 재연결+RESUME으로 복구(D24). `deliver`/`dispatch_one`이 이를 사용(이전: try_send 침묵 드롭).
+  - 노드↔노드(TcpTransport peer writer 256 + send().await)·액터 메일박스(256)는 이미 bounded — 문서에 명시.
+  - 테스트 +1: 안 읽는 세션이 채널 채우면 끊기고(rx None) 버퍼 내 RESUME은 여전히 가능. gateway 1.1.0→1.2.0.
+- 문서: decisions D27(구현), TODO Phase 2 backpressure 체크.
+
+## [1.16.0] - 2026-06-14
+### 새 기능
+- **PING/PONG 생사 판정 + Realm 소유권 failover (rehydrate)** (Phase 2, D23) — 소유 노드 사망 시 Realm이 다음 살아있는 노드로 자동 이동.
+  - `node::membership::Membership`: 피어 생사 뷰(`record_seen`/`mark_down`/`is_down`/`down_set`/`sweep`). 시간은 주입 clock(ms)로 다뤄 DST/테스트 결정론(D25).
+  - `node::ring::HashRing::owner_excluding`: down 노드를 건너뛴 일관 해싱 소유권(영향 받는 Realm만 이동). `owner`는 이를 통해 membership down_set 소비.
+  - `node::router`: `Router`에 `Membership` 보유 + `membership()` 노출. `handle_inbound`가 PING→PONG 회신, PONG/HELLO는 무처리(수신=liveness). `run_failure_detector`(주기 PING + sweep) 추가.
+  - `server`: 멀티노드 시 failure detector spawn(interval 1s/timeout 3s) + inbound 루프가 `record_seen`(주입 clock)으로 liveness 갱신.
+  - rehydrate: 새 소유 노드는 액터를 fresh-spawn(현재 액터 상태=휘발 구독자표 D12). 메시지 진실은 Postgres에 이미 persist(D24)되어 유실 없음. D35 캐시 warmup은 후속 seam.
+  - 테스트 +6: membership sweep/recover·record_seen, ring failover(영향 Realm만 이동·전부 down→None), router 소유권 failover+복귀. node 1.0.0→1.1.0.
+- 문서: decisions D23(구현), TODO Phase 2 rehydrate 체크.
+
+## [1.15.0] - 2026-06-14
+### 새 기능
+- **Gateway RESUME — per-session seq + 재생 버퍼 완성** (Phase 2, D24/D20) — 끊긴 세션을 놓친 이벤트와 함께 재개.
+  - `gateway::hub`: Hub가 **세션별 영속 상태**(user_id, 단조 seq, bounded 재생 버퍼[기본 256, D27], live sender, CSPRNG `resume_token`)를 **소켓 수명보다 오래** 보유. seq 부여·버퍼 적재를 Hub로 단일화(세션 소유 노드 권위). `attach`/`activate`(READY가 seq=1로 먼저 가도록 팬아웃 활성화 분리)/`dispatch_one`/`deliver`(세션별 seq)/`detach`(live만 분리·버퍼 유지)/`resume`(토큰·seq 검증→누락 프레임)/grace(90s) purge.
+  - `gateway::session`: 핸드셰이크를 IDENTIFY|RESUME 분기. RESUME = `resume_token`(D20)+last seq 검증 → 놓친 프레임 재생(원래 seq 보존) + `RESUMED`(t="RESUMED" dispatch). 버퍼 밖 gap·토큰 불일치·만료·미지 세션 → INVALID_SESSION(재IDENTIFY+REST 재조회). 끊김 시 `detach`로 버퍼 보존.
+  - `gateway::protocol`: `Outgoing` Clone, `ResumeData`{session_id,token,seq}, `Outgoing::resumed`, READY에 `resume_token`.
+  - `rand` 의존 추가(CSPRNG resume_token). 테스트 +5(seq 단조, 재생, 토큰 거부, evict gap 탐지, 미지 세션). 크로스노드 RESUME(다른 노드 재연결)은 버퍼가 노드 로컬이라 후속.
+- 문서: gateway.md(§2 RESUME 흐름/payload/RESUMED·resume_token, READY), decisions D24(구현 현황) 갱신, TODO Phase 2 RESUME 체크.
+
 ## [1.14.0] - 2026-06-14
 ### 새 기능
 - **raw TCP + mTLS 전송 + 멀티노드 메시 완성** (Phase 2 핵심, D3/D4/D5/D16) — in-process stub 교체, 2노드 실시간 크로스노드 채팅 라이브 검증.

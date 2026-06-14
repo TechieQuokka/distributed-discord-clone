@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "auth",
  "axum",
@@ -684,6 +684,7 @@ dependencies = [
  "futures-util",
  "node",
  "protocol",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "tokio",
@@ -1146,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "node"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "actor-rt",
  "domain",

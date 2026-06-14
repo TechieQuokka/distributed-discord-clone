@@ -192,6 +192,13 @@
 - **Postgres = 진실의 원천. Realm 액터 인메모리 상태 = 재구축 가능 캐시(write-through).** 메시지는 append-only 저장.
 - 노드 사망 → consistent hashing 재배치 → 새 노드가 Postgres에서 **rehydrate** → 죽은 노드 세션 끊김 → 클라가 다른 노드로 RESUME 재연결.
 - 이벤트 소싱은 Phase 5 스트레치 후보.
+- **구현(Phase 2)**: `node::membership::Membership` + `run_failure_detector` — 피어에 주기 PING(1s),
+  PONG/임의 트래픽 수신 시 `record_seen`, `timeout`(3s) 초과 시 down. `Router::owner`는 `HashRing::owner_excluding`로
+  **down 노드를 건너뛴 일관 해싱 소유권** → 소유 노드가 죽으면 다음 살아있는 노드가 그 Realm을 자동 소유(failover).
+  새 소유 노드는 첫 트래픽에서 RealmActor를 **새로 spawn**(lazy)한다 — 현재 액터 상태는 휘발성 구독자표(D12, DB-D5)
+  뿐이라 rehydrate = fresh-spawn + 클라 재연결 시 자동 재구독(D13)으로 충분. **메시지 진실은 Postgres에 persist-then-fanout(D24)로
+  이미 보존**되어 유실 없음(히스토리는 REST 조회). **D35 최근메시지 캐시 warmup**(Postgres 적재)은 캐시 도입 시 같은 자리에 들어갈 후속 seam.
+  노드 복귀(record_seen) 시 소유권 환원(re-join). ※ DST(D25)에선 주입 clock 기준 결정론 재현.
 
 ### D24. 전달/순서 보장
 - **순서**: Realm 액터 단일 소유 → Realm 내 전순서 무료 보장. 전역 순서는 미보장.
@@ -200,18 +207,32 @@
 - **구현(persist 위치)**: Realm 액터는 ID·순서만 확정해 이벤트를 방출하고(코어는 IO 무의존, P2),
   **단일 소비자인 dispatch 드라이버**(gateway)가 events 채널을 받아 `persist → fanout → 세션 배달` 순서로 처리한다.
   단일 액터가 순서대로 방출 → 단일 소비자가 순서대로 persist → 순서 보존. nonce 중복이면 persist 단계에서 멱등 스킵(D34).
-- **현황(Phase 1)**: per-session seq는 세션 노드가 부여(구현됨). **RESUME 재생버퍼는 Phase 2** — 현재는 재연결 시 INVALID_SESSION 후 재IDENTIFY.
+- **현황(Phase 2, 구현됨)**: per-session seq + bounded 재생 버퍼(기본 256)를 **Hub**(세션 소유 노드)가 보유.
+  소켓 끊김 = `detach`(live sender만 분리, 버퍼·구독·seq 유지, grace 90s) → RESUME이 `resume_token`(CSPRNG, D20) +
+  last seq 검증 후 누락 프레임 재생 + `RESUMED`(t="RESUMED" dispatch). 버퍼 밖 gap·토큰 불일치·만료는 INVALID_SESSION
+  → 재IDENTIFY + REST 재조회. RESUME은 버퍼가 노드 로컬이라 **동일 노드** 재연결에 한함(크로스노드 RESUME은 후속).
 
 ### D25. 테스트 = 유닛 + DST + e2e
 - **결정론적 시뮬레이션(DST)**: 가상 시계 + 시뮬레이션 네트워크 + 시드 RNG로 클러스터를 단일 프로세스에서 재현 가능 실행, 카오스(지연/유실/파티션) 주입.
 - `transport` trait + `actor-rt` 덕에 `SimTransport`+`SimClock` 주입만으로 가능. Phase 2부터.
 - + 유닛 테스트 + 소수 실프로세스 e2e (WS/Postgres 엣지).
+- **구현(Phase 2)**: `transport::sim` — `SimNetwork`(가상 시계 + `BinaryHeap` 시간순 스케줄 + 노드별 ready 큐) +
+  `SimTransport`(`NodeTransport` 구현, `send`는 즉시 큐 적재) + `DetRng`(splitmix64 시드 PRNG). 카오스 주입:
+  지연(`min/max_latency_ms`), 유실(`drop_prob`), 파티션(`partition`/`heal`). 하네스가 `advance_to`로 가상 시간을
+  진행시키면 그 시점까지 도착할 메시지를 `take_inbound`로 꺼내 `Router::handle_inbound`에 먹인다. SimClock =
+  `node::ManualClock`. `Router`/`RealmActor`는 이제 `Arc<dyn Clock>`를 주입받아(하드코딩 SystemClock 제거) DST에서
+  Snowflake id까지 결정론. 하네스 e2e(`node/tests/dst.rs`): 동일 시드 재현성 + 파티션 유실 검증.
+  후속: 액터까지 단일스레드 가상 실행기로 돌리는 완전 결정론 클러스터(현재 액터는 tokio, 네트워크 경로만 가상시간).
 
 ### D26. 관찰성 = tracing
 - `tracing` 크레이트 + 구조적 span + **노드 간 trace-id 전파**(프로토콜 헤더). (선택) OTel→Jaeger. **Phase 0부터.**
 
 ### D27. Backpressure = bounded everywhere
 - 모든 메일박스/채널 bounded. 느린 WS 클라 → 버퍼 차면 연결 끊기(클라는 재연결+RESUME). 노드 간 → bounded + 백프레셔, drop 시 resync.
+- **구현(Phase 2)**: WS 세션 채널 bounded(기본 256). `Hub::push_live`가 `try_send` 실패(느린 클라로 채널 가득)
+  시 **live sender를 drop** → 세션 채널이 닫혀 `pump` 루프 종료·소켓 close = 끊김. 프레임은 재생 버퍼에 남아
+  클라가 재연결+RESUME으로 복구(D24). 노드↔노드는 `TcpTransport`의 피어 writer 채널 bounded(256) + `send().await`로
+  자연 백프레셔(드롭 아님). 액터 메일박스도 bounded(`spawn(actor, 256)`).
 
 ### D28. DB 접근 = sqlx
 - `sqlx` (async + **컴파일타임 쿼리 검증** → 파라미터 바인딩 강제, D20과 일석이조). 마이그레이션 Phase 0부터.

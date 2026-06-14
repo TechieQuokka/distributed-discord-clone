@@ -47,7 +47,8 @@ pub struct RealmActor {
     realm_id: RealmId,
     /// 노드당 단일 generator를 주입받음 — 액터가 직접 만들지 않는다 (D11 불변식).
     snowflakes: Arc<SnowflakeGenerator>,
-    clock: Box<dyn Clock>,
+    /// 주입된 시계 — DST에선 SimClock(ManualClock)로 결정론 (D25/D11).
+    clock: Arc<dyn Clock>,
     /// user(raw) → node. 팬아웃 위치추적 (D12).
     subscribers: HashMap<u64, u64>,
     events: mpsc::Sender<RealmEvent>,
@@ -57,7 +58,7 @@ impl RealmActor {
     pub fn new(
         realm_id: RealmId,
         snowflakes: Arc<SnowflakeGenerator>,
-        clock: Box<dyn Clock>,
+        clock: Arc<dyn Clock>,
         events: mpsc::Sender<RealmEvent>,
     ) -> Self {
         Self {
@@ -128,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn send_fans_out_and_ids_are_monotonic() {
         let (etx, mut erx) = mpsc::channel(16);
-        let actor = RealmActor::new(realm(0x100), mkgen(1), Box::new(ManualClock::new(EPOCH_MS + 1)), etx);
+        let actor = RealmActor::new(realm(0x100), mkgen(1), Arc::new(ManualClock::new(EPOCH_MS + 1)), etx);
         let addr = spawn(actor, 16);
 
         addr.send(RealmCommand::Subscribe { user: uid(0xA), node: 7 }).await.unwrap();
@@ -169,7 +170,7 @@ mod tests {
     async fn unsubscribe_drops_from_targets() {
         let (etx, mut erx) = mpsc::channel(16);
         let addr = spawn(
-            RealmActor::new(realm(1), mkgen(1), Box::new(ManualClock::new(EPOCH_MS + 1)), etx),
+            RealmActor::new(realm(1), mkgen(1), Arc::new(ManualClock::new(EPOCH_MS + 1)), etx),
             16,
         );
         addr.send(RealmCommand::Subscribe { user: uid(1), node: 1 }).await.unwrap();
@@ -201,7 +202,7 @@ mod tests {
         let mk = |r: u64| {
             let (etx, erx) = mpsc::channel(16);
             let addr = spawn(
-                RealmActor::new(realm(r), Arc::clone(&shared), Box::new(ManualClock::new(clock_ms)), etx),
+                RealmActor::new(realm(r), Arc::clone(&shared), Arc::new(ManualClock::new(clock_ms)), etx),
                 16,
             );
             (addr, erx)

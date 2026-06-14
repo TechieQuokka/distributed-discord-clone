@@ -61,10 +61,10 @@
 - [x] Consistent Hashing 링 (D6) — vnode 포함
 - [x] Realm 2단 라우팅 (세션 소유 vs Realm 소유, D9)  # router: 소유판정+로컬/원격 subscribe·send + 크로스노드 fanout
 - [x] Realm-local 구독자 추적 + 팬아웃 (D12)  # 구독자표 + RealmFanout 와이어 크로스노드 배달 (in-process stub 상에서)
-- [ ] Gateway RESUME — per-session seq + 재생 버퍼 (D24)
-- [ ] Realm 상태 rehydrate (노드 재배치, D23)
-- [ ] Backpressure — bounded 채널 + 느린 클라 끊기 (D27)
-- [ ] **DST 하네스** — SimTransport + SimClock (D25)
+- [x] Gateway RESUME — per-session seq + 재생 버퍼 (D24)  # Hub 영속 세션상태(seq+bounded버퍼+CSPRNG resume_token), detach/grace/replay/RESUMED, gap→INVALID
+- [x] Realm 상태 rehydrate (노드 재배치, D23)  # PING/PONG 생사판정(Membership)+owner_excluding failover; 새 소유 노드 actor fresh-spawn(Postgres 진실 보존). D35 캐시 warmup은 후속
+- [x] Backpressure — bounded 채널 + 느린 클라 끊기 (D27)  # Hub::push_live가 채널 가득 시 live drop→pump 종료·소켓 close; 버퍼 남아 RESUME 복구. 노드간/액터 메일박스 bounded
+- [x] **DST 하네스** — SimTransport + SimClock (D25)  # transport::sim(가상시간+시드 카오스: 지연/유실/파티션); Router/RealmActor에 Clock 주입→id 결정론; node/tests/dst.rs(재현성+파티션). 액터 가상실행기는 후속
 
 ---
 

@@ -8,11 +8,13 @@
 //! 후속: 2단 라우팅(세션 소유 vs Realm 소유, D9) = ring + transport 결합.
 
 pub mod clock;
+pub mod membership;
 pub mod realm;
 pub mod ring;
 pub mod router;
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use membership::Membership;
 pub use realm::{RealmActor, RealmCommand, RealmEvent};
 pub use ring::HashRing;
-pub use router::{LocalDelivery, Routed, Router, RouterError};
+pub use router::{LocalDelivery, Routed, Router, RouterError, run_failure_detector};
