@@ -5,6 +5,17 @@
 
 ---
 
+## [1.21.0] - 2026-06-14
+### 새 기능
+- **채널 권한 오버라이드 (D17)** (Phase 3) — 채널별 역할/멤버 allow·deny. 길드 허용을 채널 deny가 덮어씀. 2유저 라이브 검증.
+  - `domain`: `permissions::{OverwriteKind, ChannelOverwrite}` + `effective_channel_permissions`(오버라이드를 대상별[@everyone=realm/역할/멤버]로 골라 `compute_channel_permissions`에 적용). `ChannelOverwriteRepository` port + `RoleRepository::member_roles_with_ids` → `Store`. 테스트 +2(채널 deny→멤버 allow 복구, 역할 오버라이드).
+  - `storage`: **V6 `0006_channel_overwrites.sql`**(+`overwrite_kind` enum). set(upsert)/list 구현 + member_roles_with_ids.
+  - `rest-api`: `perm::effective_in_channel` + `PUT /channels/:id/permissions/:target_id`(MANAGE_ROLES).
+  - `gateway`: `can_send`를 **채널 컨텍스트**로 전환(오버라이드 반영).
+  - `cli`: `set-channel-perm`.
+  - **라이브 e2e**: @everyone deny SEND_MESSAGES → bob 전송 403 → bob 멤버 overwrite allow → 전송 성공(멤버 최우선). domain/storage/rest-api 1.2→1.3, gateway 1.3→1.4, cli 1.2→1.3.
+- 문서: decisions D17(채널 오버라이드 구현), TODO 체크.
+
 ## [1.20.0] - 2026-06-14
 ### 새 기능
 - **역할/권한 (D17) — 비트마스크 + DB 역할 + 강제** (Phase 3) — @everyone 기본 + 커스텀 역할로 행동 게이팅. 2유저 라이브 검증.

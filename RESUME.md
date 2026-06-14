@@ -14,10 +14,10 @@
 
 필요 시 깊게: `docs/design-discussion.md`(논쟁 서사), `docs/database/*`, `docs/api/*`, `docs/protocol/node-wire.md`, `docs/architecture/permissions.md`.
 
-## 2. 현재 상태 (2026-06-14, v1.20.0)
+## 2. 현재 상태 (2026-06-14, v1.21.0)
 
-- 설계 문서 + Phase 0/1 + **Phase 2(분산 활성화) 완료**. **Phase 3(Discord 본체) 진행 중** — 초대 + 역할/권한 완료.
-- Phase 3(1.19~1.20): **초대(invites)**(redeem→자동구독→크로스유저 팬아웃) + **역할/권한(D17)**(roles/member_roles, @everyone 기본, MANAGE_CHANNELS/SEND_MESSAGES 등 강제) **2유저 라이브 검증**. 다음: 채널 오버라이드 / 멤버관리 / DM.
+- 설계 문서 + Phase 0/1 + **Phase 2(분산 활성화) 완료**. **Phase 3(Discord 본체) 진행 중** — 초대 + 역할/권한 + 채널 오버라이드 완료.
+- Phase 3(1.19~1.21): **초대**(redeem→자동구독→크로스유저 팬아웃) + **역할/권한(D17)**(roles/member_roles, @everyone 기본) + **채널 오버라이드**(channel_overwrites, 채널 deny가 길드 허용 덮음) — 모두 **2유저 라이브 검증**. 다음: 멤버관리/GUILD_MEMBER_ADD, DM/그룹DM.
 - Phase 2 마감(1.15~1.18): **Gateway RESUME**(per-session seq+재생버퍼+CSPRNG resume_token, D24/D20) · **PING/PONG 생사판정+소유권 failover**(Membership+owner_excluding, D23) · **Backpressure**(느린 클라 끊기, D27) · **DST 하네스**(SimTransport+SimClock+시드 카오스, D25).
 - **멀티노드 라이브 검증**: 노드1↔노드2 mTLS 연결 + 공유 PASETO 키 → 노드1 WS 구독 + 노드2 REST 전송 → 노드1이 MESSAGE_CREATE 수신(크로스노드 팬아웃). 단일노드 모드도 유지.
 - 구조: `backend/`(rust, **독립 crate** — umbrella 워크스페이스 없음) + `frontend/`(web, 미착수) + `docs/`.
@@ -26,7 +26,7 @@
 - **인증 종단**: `/auth/register|login|refresh` (PASETO + refresh 회전/재사용탐지 D14).
 - **실시간 메시징 종단**: `PgStore`(통합 저장소, `Store` 슈퍼트레잇) → REST(`/guilds`, `/channels/:id/messages`, 히스토리 D38) → **WS Gateway**(IDENTIFY/READY/HEARTBEAT/DISPATCH, 자동구독 D13) → dispatch 드라이버(persist-then-fanout D24, nonce 멱등 D34) → 세션 push. CLI `scenario`로 종단 자동검증(D1).
 - Snowflake generator는 **노드당 1개**(D11, lock-free CAS)를 server가 소유해 Router·REST·Gateway에 주입.
-- 테스트 **65개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 포함) + CLI scenario·멀티노드·초대/권한 2유저 라이브 검증. DB 라이브(V1~V5 적용).
+- 테스트 **67개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 포함) + CLI scenario·멀티노드·초대/권한/채널오버라이드 2유저 라이브 검증. DB 라이브(V1~V6 적용).
 
 ## 3. 빌드·테스트·DB (⚠ crate별 독립 — R7)
 
@@ -47,12 +47,11 @@ cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2F
 
 ## 4. 다음 작업 — 여기서 이어서
 
-**Phase 3 — Discord 본체** 진행 중. **초대 + 역할/권한(D17) 완료**(2유저 라이브). 다음 후보:
+**Phase 3 — Discord 본체** 진행 중. **초대 + 역할/권한 + 채널 오버라이드(D17) 완료**(2유저 라이브). 다음 후보:
 
-1. **채널 권한 오버라이드** — domain `Overwrite`/`compute_channel_permissions`는 이미 있음. `channel_overwrites` 테이블 + 로딩 + 강제 경로를 채널 컨텍스트로 전환하면 됨.
-2. **멤버 관리**(nick/joined/roles 조회·수정), **GUILD_MEMBER_ADD 이벤트**(현재 join은 멤버 추가만, 기존 멤버 실시간 통지 X).
-3. **DM/그룹DM**(Realm + dm_pairs, DB-D2).
-4. **리액션 / 편집·삭제(소프트) / 멘션·답장**, **친구·차단**, **읽음 상태**.
+1. **멤버 관리**(nick/joined/roles 조회·수정), **GUILD_MEMBER_ADD 이벤트**(현재 join은 멤버 추가만, 기존 멤버 실시간 통지 X).
+2. **DM/그룹DM**(Realm + dm_pairs, DB-D2).
+3. **리액션 / 편집·삭제(소프트) / 멘션·답장**, **친구·차단**, **읽음 상태**.
 
 > Phase 2 후속 seam(서두를 필요 없음): D35 Realm 최근메시지 캐시 warmup(rehydrate 시 Postgres 적재), 크로스노드 RESUME(현재 버퍼가 노드 로컬), 액터까지 도는 완전 결정론 DST 실행기.
 > 참고: PASETO 키는 단일노드는 기동마다 새로 생성됨(재시작 시 기존 토큰 무효) — 운영/멀티노드는 영속 키 필요(D14, env 로드 구현됨).

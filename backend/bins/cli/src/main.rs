@@ -32,6 +32,8 @@ enum Command {
     CreateRole(CreateRoleArgs),
     /// 멤버에게 역할 부여 (MANAGE_ROLES 필요).
     AssignRole(AssignRoleArgs),
+    /// 채널 권한 오버라이드 설정 (MANAGE_ROLES 필요).
+    SetChannelPerm(SetChannelPermArgs),
     /// 길드 초대 코드 생성 (멤버 전용).
     CreateInvite(CreateInviteArgs),
     /// 초대 코드로 길드 합류.
@@ -103,6 +105,23 @@ struct AssignRoleArgs {
     user: String,
     #[arg(long)]
     role: String,
+}
+#[derive(Args)]
+struct SetChannelPermArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    /// 대상 id (role_id 또는 user_id; @everyone은 guild/realm id).
+    #[arg(long)]
+    target: String,
+    /// "role" | "member".
+    #[arg(long, default_value = "role")]
+    kind: String,
+    #[arg(long, default_value_t = 0)]
+    allow: u64,
+    #[arg(long, default_value_t = 0)]
+    deny: u64,
 }
 #[derive(Args)]
 struct CreateInviteArgs {
@@ -184,6 +203,9 @@ async fn main() -> std::process::ExitCode {
         Command::AssignRole(a) => rest::assign_role(&base, &a.token, &a.guild, &a.user, &a.role)
             .await
             .map(|_| println!("✅ role {} assigned to {}", a.role, a.user)),
+        Command::SetChannelPerm(a) => rest::set_channel_perm(&base, &a.token, &a.channel, &a.target, &a.kind, a.allow, a.deny)
+            .await
+            .map(|_| println!("✅ overwrite set on channel {} for {} (allow={} deny={})", a.channel, a.target, a.allow, a.deny)),
         Command::CreateInvite(a) => rest::create_invite(&base, &a.token, &a.guild, a.max_uses, a.max_age)
             .await
             .map(|inv| {

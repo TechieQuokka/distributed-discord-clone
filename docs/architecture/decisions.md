@@ -147,7 +147,8 @@
 
 ### D17. 인가 = Discord 권한 비트마스크
 - 계산순서 그대로: `@everyone` → 역할 OR → 채널 오버라이드(deny/allow) → 멤버 오버라이드 → Administrator 통과. 채널마다 재계산.
-- **구현(Phase 3)**: 비트(`domain::permissions::Permissions`)·계산(`compute_guild_permissions`/`compute_channel_permissions`)은 domain(순수). 저장 = `roles`/`member_roles`(V5), `@everyone`=`roles.id==realm_id`(길드 생성 시 `default_everyone` 권한으로 자동). `RoleRepository`(create/list/assign/everyone_perms/member_role_perms). 강제는 어댑터에서 DB 데이터를 모아 domain 함수로 계산 후 검사: rest-api `perm::require`(채널생성 MANAGE_CHANNELS·초대 CREATE_INVITE·역할관리 MANAGE_ROLES, 권한상승 방지), gateway `can_send`(SEND_MESSAGES). owner/Admin 단축. **채널 오버라이드(`channel_overwrites`)는 계산 함수만 있고 저장·로딩 미배선 = 다음 항목.**
+- **구현(Phase 3)**: 비트(`domain::permissions::Permissions`)·계산(`compute_guild_permissions`/`compute_channel_permissions`)은 domain(순수). 저장 = `roles`/`member_roles`(V5), `@everyone`=`roles.id==realm_id`(길드 생성 시 `default_everyone` 권한으로 자동). `RoleRepository`(create/list/assign/everyone_perms/member_role_perms). 강제는 어댑터에서 DB 데이터를 모아 domain 함수로 계산 후 검사: rest-api `perm::require`(채널생성 MANAGE_CHANNELS·초대 CREATE_INVITE·역할관리 MANAGE_ROLES, 권한상승 방지), gateway `can_send`(SEND_MESSAGES). owner/Admin 단축.
+- **채널 오버라이드(Phase 3, 구현됨)**: `channel_overwrites`(V6, `overwrite_kind` enum) + `ChannelOverwriteRepository`(set/list) + `member_roles_with_ids`. `domain::permissions::effective_channel_permissions`가 오버라이드 목록에서 대상별(@everyone=realm_id / 역할 / 멤버)로 골라 `compute_channel_permissions`에 적용(deny→allow, 멤버 최우선). REST `PUT /channels/:id/permissions/:target_id`(MANAGE_ROLES). `can_send`/`perm::effective_in_channel`는 채널 컨텍스트로 계산 → 채널 deny가 길드 허용을 덮어씀. 라이브 검증: @everyone deny SEND → 차단, 멤버 allow → 복구.
 
 ### D18. 봇방지 = PoW 챌린지 + Rate limit
 - 가입/로그인 시 **Proof-of-Work 해시 퍼즐**(hashcash/mCaptcha/Anubis 스타일) — 제3자 의존 0, 수제 구현.

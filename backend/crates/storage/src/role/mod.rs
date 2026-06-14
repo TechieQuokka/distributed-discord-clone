@@ -89,6 +89,24 @@ impl RoleRepository for PgStore {
         .map_err(map_err)?;
         Ok(rows.iter().map(|r| r.get::<i64, _>("permissions") as u64).collect())
     }
+
+    async fn member_roles_with_ids(
+        &self,
+        realm_id: RealmId,
+        user_id: UserId,
+    ) -> Result<Vec<(u64, u64)>, RepoError> {
+        let rows = sqlx::query(
+            "SELECT r.id, r.permissions FROM member_roles mr
+             JOIN roles r ON r.id = mr.role_id
+             WHERE mr.realm_id = $1 AND mr.user_id = $2 AND r.id <> $1",
+        )
+        .bind(realm_id.0.raw() as i64)
+        .bind(user_id.0.raw() as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.iter().map(|r| (r.get::<i64, _>("id") as u64, r.get::<i64, _>("permissions") as u64)).collect())
+    }
 }
 
 #[cfg(test)]
