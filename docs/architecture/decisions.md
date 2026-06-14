@@ -222,6 +222,10 @@
 
 ### D27. Backpressure = bounded everywhere
 - 모든 메일박스/채널 bounded. 느린 WS 클라 → 버퍼 차면 연결 끊기(클라는 재연결+RESUME). 노드 간 → bounded + 백프레셔, drop 시 resync.
+- **구현(Phase 2)**: WS 세션 채널 bounded(기본 256). `Hub::push_live`가 `try_send` 실패(느린 클라로 채널 가득)
+  시 **live sender를 drop** → 세션 채널이 닫혀 `pump` 루프 종료·소켓 close = 끊김. 프레임은 재생 버퍼에 남아
+  클라가 재연결+RESUME으로 복구(D24). 노드↔노드는 `TcpTransport`의 피어 writer 채널 bounded(256) + `send().await`로
+  자연 백프레셔(드롭 아님). 액터 메일박스도 bounded(`spawn(actor, 256)`).
 
 ### D28. DB 접근 = sqlx
 - `sqlx` (async + **컴파일타임 쿼리 검증** → 파라미터 바인딩 강제, D20과 일석이조). 마이그레이션 Phase 0부터.

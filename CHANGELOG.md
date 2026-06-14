@@ -5,6 +5,14 @@
 
 ---
 
+## [1.17.0] - 2026-06-14
+### 새 기능
+- **Backpressure — 느린 WS 클라 끊기 정책** (Phase 2, D27) — 채널 가득 시 침묵 드롭 대신 연결을 끊어 RESUME 복구 유도.
+  - `gateway::hub`: `SessionEntry::push_live` — `try_send` 실패(느린 클라로 채널 가득/닫힘) 시 **live sender drop** → 세션 채널이 닫혀 `pump` 종료·소켓 close. 프레임은 재생 버퍼에 남아 재연결+RESUME으로 복구(D24). `deliver`/`dispatch_one`이 이를 사용(이전: try_send 침묵 드롭).
+  - 노드↔노드(TcpTransport peer writer 256 + send().await)·액터 메일박스(256)는 이미 bounded — 문서에 명시.
+  - 테스트 +1: 안 읽는 세션이 채널 채우면 끊기고(rx None) 버퍼 내 RESUME은 여전히 가능. gateway 1.1.0→1.2.0.
+- 문서: decisions D27(구현), TODO Phase 2 backpressure 체크.
+
 ## [1.16.0] - 2026-06-14
 ### 새 기능
 - **PING/PONG 생사 판정 + Realm 소유권 failover (rehydrate)** (Phase 2, D23) — 소유 노드 사망 시 Realm이 다음 살아있는 노드로 자동 이동.

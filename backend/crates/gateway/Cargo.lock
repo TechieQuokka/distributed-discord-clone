@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "auth",
  "axum",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "node"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "actor-rt",
  "domain",

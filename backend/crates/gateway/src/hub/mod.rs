@@ -55,6 +55,16 @@ impl SessionEntry {
         }
         self.buffer.push_back(frame);
     }
+
+    /// live 소켓 채널로 push. 채널이 가득(느린 클라)하거나 닫혔으면 **live를 drop**(끊김, D27)
+    /// → 세션 채널이 닫혀 pump가 종료·소켓 close. 프레임은 이미 버퍼에 있어 RESUME으로 복구.
+    fn push_live(&mut self, frame: Outgoing) {
+        if let Some(tx) = &self.live {
+            if tx.try_send(frame).is_err() {
+                self.live = None; // backpressure: 느린 세션 분리(버퍼 유지).
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -118,14 +128,13 @@ impl Hub {
             e.seq += 1;
             let frame = Outgoing::dispatch(e.seq, t, d);
             e.buffer_push(frame.clone());
-            if let Some(tx) = &e.live {
-                let _ = tx.try_send(frame);
-            }
+            e.push_live(frame);
         }
     }
 
     /// 대상 유저들의 모든 세션에 이벤트 배달. 세션마다 seq 부여 + 버퍼 적재.
-    /// 느린 세션(가득 참)은 live push만 건너뜀 — 버퍼엔 남아 RESUME으로 복구(D27).
+    /// 느린 세션(채널 가득)은 **연결을 끊는다**(D27): live sender를 drop → 세션 채널이 닫혀
+    /// pump 루프가 종료·소켓 close. 프레임은 버퍼에 남아 클라가 재연결+RESUME으로 복구.
     pub fn deliver(&self, user_ids: &[u64], event: &ServerEvent) {
         let mut inner = self.inner.lock().unwrap();
         // user → session_ids 를 먼저 모아 빌림 충돌 회피.
@@ -140,9 +149,7 @@ impl Hub {
                 e.seq += 1;
                 let frame = Outgoing::dispatch(e.seq, &event.t, event.d.clone());
                 e.buffer_push(frame.clone());
-                if let Some(tx) = &e.live {
-                    let _ = tx.try_send(frame);
-                }
+                e.push_live(frame);
             }
         }
     }
@@ -305,6 +312,33 @@ mod tests {
                 assert_eq!(seqs, vec![4, 5, 6]);
             }
             ResumeOutcome::Invalid => panic!("seq3 이후는 재개 가능해야 함"),
+        }
+    }
+
+    /// 느린 클라(채널 가득)는 끊긴다(D27): live sender drop → 채널 닫힘. 버퍼는 남아 RESUME 복구.
+    #[tokio::test]
+    async fn slow_session_is_disconnected_but_buffer_survives() {
+        let hub = Hub::new();
+        let cap = 2;
+        let (mut rx, token) = hub.attach(1, 100, cap);
+        hub.activate(1, 100);
+
+        // rx를 안 읽어 채널을 채운다: a,b는 채널에 적재, c/d는 가득 → live drop(끊김).
+        for c in ["a", "b", "c", "d"] {
+            hub.deliver(&[1], &ev(c));
+        }
+        // 채널에 버퍼됐던 a,b는 받지만, 이후엔 닫힘(None) → 끊김 확인.
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_none(), "느린 세션은 끊겨야 함(live drop)");
+
+        // 재생 버퍼(cap2)는 최신 2개(seq3,4) 보유 → seq2까지 받은 클라는 RESUME으로 복구.
+        match hub.resume(100, &token, 2, cap) {
+            ResumeOutcome::Resumed { replay, .. } => {
+                let seqs: Vec<u64> = replay.iter().filter_map(|f| f.s).collect();
+                assert_eq!(seqs, vec![3, 4]);
+            }
+            ResumeOutcome::Invalid => panic!("끊긴 뒤에도 버퍼 내 RESUME은 가능해야 함"),
         }
     }
 
