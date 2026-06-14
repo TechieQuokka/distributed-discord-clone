@@ -1,0 +1,10 @@
+# backend (rust) — 독립 crate마다 target이 있으므로 모든 target 제외 (R7)
+target/
+**/*.rs.bk
+# frontend (web)
+/frontend/node_modules
+/frontend/dist
+# secrets
+.env
+*.pem
+*.key

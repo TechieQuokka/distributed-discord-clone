@@ -1,0 +1,20 @@
+[package]
+name = "server"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+gateway = { path = "../../crates/gateway" }
+rest-api = { path = "../../crates/rest-api" }
+node = { path = "../../crates/node" }
+storage = { path = "../../crates/storage" }
+transport = { path = "../../crates/transport" }
+domain = { path = "../../crates/domain" }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+axum = "0.8.9"
+auth = { version = "1.0.0", path = "../../crates/auth" }
+dotenvy = "0.15.7"
+cluster-config = { version = "1.0.0", path = "../../crates/cluster-config" }

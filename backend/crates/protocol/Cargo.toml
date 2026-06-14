@@ -1,0 +1,9 @@
+[package]
+name = "protocol"
+version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+domain = { path = "../domain" }
+thiserror = "2.0.18"

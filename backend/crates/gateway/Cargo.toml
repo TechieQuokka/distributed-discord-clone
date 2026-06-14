@@ -1,0 +1,18 @@
+[package]
+name = "gateway"
+version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+auth = { version = "1.0.0", path = "../auth" }
+axum = { version = "0.8.9", features = ["ws"] }
+domain = { path = "../domain" }
+futures-util = "0.3.32"
+node = { path = "../node" }
+protocol = { path = "../protocol" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["rt", "macros", "sync"] }
+tracing = "0.1.44"
+transport = { version = "1.0.0", path = "../transport" }

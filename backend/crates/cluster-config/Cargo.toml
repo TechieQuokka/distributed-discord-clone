@@ -1,0 +1,10 @@
+[package]
+name = "cluster-config"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "1.1.2"

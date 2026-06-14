@@ -1,0 +1,13 @@
+[package]
+name = "node"
+version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+domain = { path = "../domain" }
+actor-rt = { path = "../actor-rt" }
+tokio = { version = "1.52.3", features = ["sync", "rt", "macros", "time"] }
+transport = { version = "1.0.0", path = "../transport" }
+protocol = { version = "1.0.0", path = "../protocol" }
+thiserror = "2.0.18"

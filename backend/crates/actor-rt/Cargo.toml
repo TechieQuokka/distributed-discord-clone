@@ -1,0 +1,9 @@
+[package]
+name = "actor-rt"
+version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["rt", "macros", "sync"] }

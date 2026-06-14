@@ -1,0 +1,15 @@
+[package]
+name = "transport"
+version = "1.0.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+protocol = { path = "../protocol" }
+rcgen = "0.14.8"
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["sync", "rt", "macros", "net", "io-util", "time"] }
+tokio-rustls = "0.26.4"
+tracing = "0.1.44"
