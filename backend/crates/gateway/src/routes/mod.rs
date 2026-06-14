@@ -68,7 +68,7 @@ async fn send_message<S: Store + 'static, T: NodeTransport>(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
         .ok_or((StatusCode::NOT_FOUND, "channel not found"))?;
-    if !can_send(&*state.store, channel.realm_id, user).await? {
+    if !can_send(&*state.store, channel_id, channel.realm_id, user).await? {
         return Err((StatusCode::FORBIDDEN, "missing SEND_MESSAGES"));
     }
 
@@ -82,13 +82,14 @@ async fn send_message<S: Store + 'static, T: NodeTransport>(
     Ok((StatusCode::ACCEPTED, Json(SendAck { queued: true, nonce: req.nonce })))
 }
 
-/// 멤버이면서 채널 Realm에 SEND_MESSAGES 권한이 있는가 (D17). 계산은 domain.
+/// 멤버이면서 **채널 컨텍스트**(오버라이드 적용)에서 SEND_MESSAGES 권한이 있는가 (D17). 계산은 domain.
 async fn can_send<S: Store>(
     store: &S,
+    channel_id: domain::id::ChannelId,
     realm: domain::id::RealmId,
     user: UserId,
 ) -> Result<bool, (StatusCode, &'static str)> {
-    use domain::permissions::{Permissions, compute_guild_permissions};
+    use domain::permissions::{Permissions, effective_channel_permissions};
     let db = |_| (StatusCode::INTERNAL_SERVER_ERROR, "db error");
     if !store.is_member(realm, user).await.map_err(db)? {
         return Ok(false);
@@ -100,14 +101,23 @@ async fn can_send<S: Store>(
         .map_err(db)?
         .map(Permissions::from_bits_truncate)
         .unwrap_or_else(Permissions::default_everyone);
-    let roles: Vec<Permissions> = store
-        .member_role_permissions(realm, user)
+    let member_roles: Vec<(u64, Permissions)> = store
+        .member_roles_with_ids(realm, user)
         .await
         .map_err(db)?
         .into_iter()
-        .map(Permissions::from_bits_truncate)
+        .map(|(id, bits)| (id, Permissions::from_bits_truncate(bits)))
         .collect();
-    Ok(compute_guild_permissions(is_owner, everyone, &roles).contains(Permissions::SEND_MESSAGES))
+    let overwrites = store.list_overwrites(channel_id).await.map_err(db)?;
+    let perms = effective_channel_permissions(
+        is_owner,
+        realm.0.raw(),
+        user.0.raw(),
+        everyone,
+        &member_roles,
+        &overwrites,
+    );
+    Ok(perms.contains(Permissions::SEND_MESSAGES))
 }
 
 // --- 인증 추출기 (gateway 로컬: rest-api와 독립) ---

@@ -7,6 +7,7 @@ use crate::guild::{Guild, NewGuild};
 use crate::id::{ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, UserId};
 use crate::invite::{Invite, NewInvite};
 use crate::message::{Message, NewMessage};
+use crate::permissions::ChannelOverwrite;
 use crate::refresh_token::{NewRefreshToken, RefreshToken};
 use crate::role::{NewRole, Role};
 use crate::user::{NewUser, User};
@@ -145,6 +146,27 @@ pub trait RoleRepository: Send + Sync {
         realm_id: RealmId,
         user_id: UserId,
     ) -> impl Future<Output = Result<Vec<u64>, RepoError>> + Send;
+
+    /// 멤버의 (비-@everyone) 역할 (role_id, permissions) 목록 — 채널 오버라이드 매칭용.
+    fn member_roles_with_ids(
+        &self,
+        realm_id: RealmId,
+        user_id: UserId,
+    ) -> impl Future<Output = Result<Vec<(u64, u64)>, RepoError>> + Send;
+}
+
+/// 채널 권한 오버라이드 저장소 port (D17, 스키마 `channel_overwrites`).
+pub trait ChannelOverwriteRepository: Send + Sync {
+    /// 오버라이드 upsert (allow/deny 갱신). allow·deny 모두 0이면 삭제로 취급해도 됨(구현 재량).
+    fn set_overwrite(
+        &self,
+        ow: &ChannelOverwrite,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    fn list_overwrites(
+        &self,
+        channel_id: ChannelId,
+    ) -> impl Future<Output = Result<Vec<ChannelOverwrite>, RepoError>> + Send;
 }
 
 /// 채널 저장소 port.
@@ -188,6 +210,7 @@ pub trait Store:
     + RefreshTokenRepository
     + GuildRepository
     + RoleRepository
+    + ChannelOverwriteRepository
     + InviteRepository
     + ChannelRepository
     + MessageRepository
@@ -199,6 +222,7 @@ impl<T> Store for T where
         + RefreshTokenRepository
         + GuildRepository
         + RoleRepository
+        + ChannelOverwriteRepository
         + InviteRepository
         + ChannelRepository
         + MessageRepository

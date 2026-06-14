@@ -176,6 +176,38 @@ pub async fn assign_role(base: &str, token: &str, guild: &str, user: &str, role:
 }
 
 #[derive(Serialize)]
+struct SetOverwriteBody<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    allow: u64,
+    deny: u64,
+}
+
+pub async fn set_channel_perm(
+    base: &str,
+    token: &str,
+    channel: &str,
+    target: &str,
+    kind: &str,
+    allow: u64,
+    deny: u64,
+) -> Result<(), String> {
+    let res = client()
+        .put(format!("{base}/channels/{channel}/permissions/{target}"))
+        .bearer_auth(token)
+        .json(&SetOverwriteBody { kind, allow, deny })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{status}: {}", res.text().await.unwrap_or_default()))
+    }
+}
+
+#[derive(Serialize)]
 struct CreateInviteBody {
     max_uses: i32,
     max_age: i64,

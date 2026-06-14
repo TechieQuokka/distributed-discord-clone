@@ -1,6 +1,7 @@
 //! REST 라우트 조합 (개념: routes). 개념별 서브모듈을 하나의 Router로.
 
 pub mod auth;
+pub mod channel;
 pub mod guild;
 pub mod invite;
 pub mod message;
@@ -17,6 +18,7 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(guild::routes::<S>())
         .merge(invite::routes::<S>())
         .merge(role::routes::<S>())
+        .merge(channel::routes::<S>())
         .merge(message::routes::<S>())
         .with_state(state)
 }

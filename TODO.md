@@ -71,7 +71,7 @@
 ## Phase 3 — Discord 본체
 
 - [x] 역할/권한 비트마스크 + 계산순서 (D17)  # roles/member_roles(V5)+@everyone 기본, RoleRepository, REST 역할관리, 강제(SEND_MESSAGES/MANAGE_CHANNELS/CREATE_INVITE/MANAGE_ROLES) 2유저 라이브
-- [ ] 채널 권한 오버라이드  # domain Overwrite/compute_channel_permissions는 구현됨, channel_overwrites 테이블+로딩 미배선
+- [x] 채널 권한 오버라이드  # channel_overwrites(V6)+ChannelOverwriteRepository, effective_channel_permissions 배선, REST PUT /channels/:id/permissions/:tid, gateway can_send 채널컨텍스트화. 2유저 라이브(deny@everyone→member allow)
 - [ ] DM / 그룹DM (Realm + dm_pairs, DB-D2)
 - [ ] 멤버 관리 (nick/joined/roles)
 - [x] 초대 (invites)  # domain Invite/port + storage(트랜잭션 redeem)+V4 마이그레이션 + REST(생성/redeem) + CLI(create-invite/join). 2유저 라이브 검증(초대→합류→자동구독→크로스유저 팬아웃)
