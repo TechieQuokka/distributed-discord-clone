@@ -14,7 +14,7 @@
 
 필요 시 깊게: `docs/design-discussion.md`(논쟁 서사), `docs/database/*`, `docs/api/*`, `docs/protocol/node-wire.md`, `docs/architecture/permissions.md`.
 
-## 2. 현재 상태 (2026-06-14, v1.21.0)
+## 2. 현재 상태 (2026-06-14, v1.21.2)
 
 - 설계 문서 + Phase 0/1 + **Phase 2(분산 활성화) 완료**. **Phase 3(Discord 본체) 진행 중** — 초대 + 역할/권한 + 채널 오버라이드 완료.
 - Phase 3(1.19~1.21): **초대**(redeem→자동구독→크로스유저 팬아웃) + **역할/권한(D17)**(roles/member_roles, @everyone 기본) + **채널 오버라이드**(channel_overwrites, 채널 deny가 길드 허용 덮음) — 모두 **2유저 라이브 검증**. 다음: 멤버관리/GUILD_MEMBER_ADD, DM/그룹DM.
@@ -39,11 +39,12 @@ cd backend/crates/<name> && cargo test
 #   postgres://david:2147483647@%2Fvar%2Frun%2Fpostgresql:48853/discord_v1
 cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2Frun%2Fpostgresql:48853/discord_v1' cargo test
 ```
-- 마이그레이션 V1(users/realms/guilds/channels/messages) + **V2 `refresh_tokens`** + **V3 `members`** 적용됨. psql: `psql -p 48853 -d discord_v1`.
+- 마이그레이션 V1(users/realms/guilds/channels/messages) · **V2 `refresh_tokens`** · **V3 `members`** · **V4 `invites`** · **V5 `roles`+`member_roles`** · **V6 `channel_overwrites`**(+`overwrite_kind` enum) 적용됨. psql: `psql -p 48853 -d discord_v1`.
 - 서버 실행(단일노드): `cd backend/bins/server && DATABASE_URL=... REST_ADDR=127.0.0.1:8080 cargo run`.
 - **멀티노드(mTLS 메시)**: `server gen-certs /tmp/mesh 1 2` + `server gen-keys` → 노드별 `CLUSTER_CONFIG`(TOML: node id/worker_id/listen_addr + peers) + `TLS_CA/TLS_CERT/TLS_KEY` + 공유 `PASETO_SECRET/PASETO_PUBLIC` env로 각각 기동. (작은 id가 큰 id에게 dial.)
 - 종단 데모(서버 띄운 뒤): `cd backend/bins/cli && cargo run -- --url http://127.0.0.1:8080 scenario` → 가입~메시지수신 자동 검증.
 - 수동: `cli register` → `cli create-guild --token T --name G` → `cli listen --token T`(다른 터미널) → `cli send --token T --channel C --content hi`.
+- 멀티유저/권한(Phase 3) CLI: `create-invite --token T --guild G` → `join --token T2 --code C`(둘째 유저 합류) · `create-role --token T --guild G --name r --permissions <u64>` · `assign-role --token T --guild G --user U --role R` · `set-channel-perm --token T --channel C --target <role|user id> --kind role|member --allow <u64> --deny <u64>` · `create-channel --token T --guild G --name n`. (권한 강제: 전송=SEND_MESSAGES, 채널생성=MANAGE_CHANNELS, 히스토리=VIEW_CHANNEL+READ_MESSAGE_HISTORY, 역할/오버라이드=MANAGE_ROLES.)
 
 ## 4. 다음 작업 — 여기서 이어서
 
