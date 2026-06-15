@@ -17,7 +17,7 @@
 | 본문 | `application/json` (멀티파트는 첨부 업로드만) |
 | 멱등성 | 메시지 전송 시 `nonce` (D34) |
 | 페이지네이션 | Snowflake 커서 `before`/`after`/`around` + `limit` (D38) |
-| Rate limit | per-route/per-user Token Bucket (D18/D32). 응답 헤더에 잔량 표기 |
+| Rate limit | Token Bucket **per-node**(D32, 구현됨) — `/auth/*` 전역·인증 유저별·미인증 anon 버킷. 초과 429 + 헤더 |
 
 ### 표준 에러 형식
 ```json
@@ -37,13 +37,16 @@
 X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 ```
 
-### 구현 현황 (Phase 1–3, v1.24.x)
+### 구현 현황 (Phase 1–4, v1.32.x)
 
 > 아래 §1~ 표는 **전체 카피 대상 청사진**이다. **현재 실제 구현된 엔드포인트**는 다음과 같다(나머지는 후속 Phase).
 
 | 메서드 | 경로 | 강제 권한 | 비고 |
 |---|---|---|---|
-| POST | `/auth/{register,login,refresh}` | — | PASETO + refresh 회전/재사용탐지 (D14) |
+| GET | `/auth/pow-challenge` | — | 가입용 PoW 챌린지 발급 `{challenge, difficulty}` (D18, stateless PASETO v4.local) |
+| POST | `/auth/{register,login,refresh}` | — | PASETO + refresh 회전/재사용탐지 (D14). **register는 `pow_challenge`+`pow_nonce` 필수** (D18). login은 MFA 활성 시 `{mfa_required:true}` |
+| POST | `/auth/mfa/totp/{enable,verify,disable}` | enable/verify/disable=인증 | TOTP 설정(D19): enable=secret+URI 발급 / verify=확인 후 저장(활성) / disable=코드 확인 후 제거 |
+| POST | `/auth/mfa/totp` | — | 로그인 2단계: `username`+`password`+`code` → 토큰 (D19) |
 | POST | `/guilds` | — | 길드 + @everyone 역할 + 기본 general 채널 |
 | POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | |
 | GET / POST | `/guilds/{id}/roles` | GET=멤버 / POST=MANAGE_ROLES (권한상승 방지) | |

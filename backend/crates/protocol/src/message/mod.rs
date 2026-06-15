@@ -30,6 +30,7 @@ pub mod msg_type {
     pub const SUBSCRIBE: u16 = 0x0110;
     pub const UNSUBSCRIBE: u16 = 0x0111;
     pub const PRESENCE_GOSSIP: u16 = 0x0201;
+    pub const USER_DELIVER: u16 = 0x0202;
 }
 
 /// 노드↔노드 메시지.
@@ -68,6 +69,10 @@ pub enum NodeMessage {
     /// 전역 presence 델타 (Q11/D12). `node_id`=이 유저를 호스팅(또는 해제)한 노드, `status`=user_status u8.
     /// 풀메시 브로드캐스트 → 각 노드가 자기 view 갱신 후 그 유저의 로컬 친구에게 PRESENCE_UPDATE 배달.
     PresenceGossip { user_id: u64, node_id: u64, status: u8 },
+    /// 크로스노드 유저 이벤트 타깃 배달 (D43). Realm 무관 유저 이벤트(친구·읽음 등)를
+    /// 대상 유저를 호스팅하는 노드에만 전송(broadcast 아님). 수신 노드가 로컬 세션에 배달.
+    /// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON(불투명), `user_ids`=이 노드의 로컬 대상.
+    UserDeliver { t: String, payload: String, user_ids: Vec<u64> },
 }
 
 impl NodeMessage {
@@ -83,6 +88,7 @@ impl NodeMessage {
             NodeMessage::Subscribe { .. } => msg_type::SUBSCRIBE,
             NodeMessage::Unsubscribe { .. } => msg_type::UNSUBSCRIBE,
             NodeMessage::PresenceGossip { .. } => msg_type::PRESENCE_GOSSIP,
+            NodeMessage::UserDeliver { .. } => msg_type::USER_DELIVER,
         }
     }
 
@@ -132,6 +138,14 @@ impl NodeMessage {
                 w.u64(*user_id);
                 w.u64(*node_id);
                 w.u8(*status);
+            }
+            NodeMessage::UserDeliver { t, payload, user_ids } => {
+                w.string(t);
+                w.string(payload);
+                w.u32(user_ids.len() as u32);
+                for u in user_ids {
+                    w.u64(*u);
+                }
             }
         }
     }
@@ -183,6 +197,16 @@ impl NodeMessage {
                 node_id: r.u64()?,
                 status: r.u8()?,
             },
+            msg_type::USER_DELIVER => {
+                let t = r.string()?;
+                let payload = r.string()?;
+                let n = r.u32()? as usize;
+                let mut user_ids = Vec::with_capacity(n);
+                for _ in 0..n {
+                    user_ids.push(r.u64()?);
+                }
+                NodeMessage::UserDeliver { t, payload, user_ids }
+            }
             other => return Err(DecodeError::UnknownTag(other)),
         })
     }
@@ -274,6 +298,20 @@ mod tests {
         let (payload, _) = read_frame(&framed).unwrap().unwrap();
         let (h, decoded) = NodeMessage::decode(payload).unwrap();
         assert_eq!(h.msg_type, msg_type::PRESENCE_GOSSIP);
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn user_deliver_round_trip() {
+        let msg = NodeMessage::UserDeliver {
+            t: "RELATIONSHIP_ADD".into(),
+            payload: r#"{"user":{"id":"10"},"kind":"pending_in"}"#.into(),
+            user_ids: vec![10, 20, 30],
+        };
+        let framed = msg.encode(2, 0x77);
+        let (payload, _) = read_frame(&framed).unwrap().unwrap();
+        let (h, decoded) = NodeMessage::decode(payload).unwrap();
+        assert_eq!(h.msg_type, msg_type::USER_DELIVER);
         assert_eq!(decoded, msg);
     }
 

@@ -7,9 +7,11 @@ pub mod error;
 pub mod events;
 pub mod extract;
 pub mod perm;
+pub mod ratelimit;
 pub mod routes;
 pub mod state;
 
 pub use error::ApiError;
+pub use ratelimit::RateLimiter;
 pub use routes::router;
 pub use state::AppState;

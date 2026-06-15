@@ -224,23 +224,8 @@ impl Hub {
     }
 }
 
-/// 유저 단위 실시간 이벤트 포트 구현 (친구·차단 등 Realm 무관 이벤트). rest-api가 `Arc<dyn UserEmitter>`로 주입.
-/// payload(직렬화된 JSON)를 역파싱해 대상 유저의 **이 노드 로컬 세션**에 배달한다.
-/// ⚠ 크로스노드(다른 노드의 세션)는 전역 presence/gossip(Q11) 도입 후의 seam.
-impl domain::emit::UserEmitter for Hub {
-    fn emit_to_users(
-        &self,
-        users: &[domain::id::UserId],
-        t: String,
-        payload: String,
-    ) -> domain::emit::BoxFuture<'_, ()> {
-        let ids: Vec<u64> = users.iter().map(|u| u.0.raw()).collect();
-        Box::pin(async move {
-            let d: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
-            self.deliver(&ids, &ServerEvent { t, d });
-        })
-    }
-}
+// 유저 단위 이벤트 포트(`UserEmitter`) 구현은 `user_route::UserRouter`(D43)로 이전 —
+// Hub는 로컬 세션 배달 프리미티브(`deliver`)만 제공하고, 크로스노드 라우팅은 UserRouter가 조합한다.
 
 impl Inner {
     fn drop_session(&mut self, session_id: u64) {

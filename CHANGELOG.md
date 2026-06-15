@@ -5,6 +5,62 @@
 
 ---
 
+## [1.32.0] - 2026-06-15
+### 새 기능
+- **TOTP MFA (Phase 4, D19)** — 2단계 인증(RFC 6238). 인증/봇방지 묶음 마무리.
+  - **흐름**: `enable`(secret+otpauth URI 발급, **미저장**) → `verify`(secret+code 확인 시 저장=활성, **락아웃 방지** — 미확인 secret로 안 잠김) → `disable`(코드 확인 후 제거). 로그인은 MFA 활성 유저면 토큰 대신 `{mfa_required:true}` → `POST /auth/mfa/totp`(비번 재확인+코드)로 토큰.
+  - **저장**: secret(raw)은 `users.mfa_totp_secret`(BYTEA, **V1에 이미 존재 → 마이그레이션 0**). 민감값이라 `User` 엔티티엔 안 싣고 전용 포트.
+  - `auth`: 신규 **`totp`** 모듈(`totp-rs`, P6 검증 크레이트 — SHA1·6자리·30s·skew1: `new_secret`/`otpauth_uri`/`verify`/`generate`/hex). 유닛 +5. (1.1→1.2)
+  - `domain`: `UserRepository`에 `set_totp_secret`/`totp_secret` 포트. (1.9→1.10)
+  - `storage`: PgStore 구현(UPDATE/SELECT `mfa_totp_secret`). (1.9→1.10)
+  - `rest-api`: `/auth/mfa/totp/{enable,verify,disable}` + `/auth/mfa/totp`(2단계) + login MFA 게이트. MemStore totp + MFA 전체흐름 통합 +1. (1.11→1.12)
+  - `cli`: `mfa-enable`/`mfa-verify`/`mfa-login` + `totp-code`(인증앱 대역) + login `mfa_required` 분기. (1.10→1.11)
+- 문서(R2): decisions **D19** 구현 노트, `api/rest.md`(mfa 엔드포인트 + login mfa_required). TODO 체크.
+- **라이브 e2e**: 단일노드 — register(PoW) → mfa-enable → totp-code → verify → login(**mfa_required**) → mfa-login(**토큰 발급**), 틀린 코드 **401**. otpauth URI(`otpauth://totp/discord-v1:user?secret=…&issuer=discord-v1`) 정상.
+- seam: 로그인 2단계는 비번 재제출(ticket 미사용) · 백업코드(`mfa_backup_codes`)·WebAuthn은 후속(Phase 5).
+- 전 crate 테스트 합계 **127** (auth 18 · rest-api 21+4 · domain 18 · storage 12 · protocol 9 · node 20+2 · gateway 8 등). 마이그레이션 V1~V11(무DB 변경 — mfa 컬럼은 V1 기존).
+
+## [1.31.0] - 2026-06-15
+### 새 기능
+- **Rate limiting (Phase 4, D32/D18) — Token Bucket per-node** — 봇/폭주 방지. PoW(가입 D18)와 상보적인 **휘발 per-node** 한도.
+  - **모델**: 순수 `TokenBucket`(용량 + 초당 리필, 연속 토큰) + per-node `RateLimiter`(`rule:identity`별 버킷, **인메모리 DB-D5 휘발**). 분산 근사(D32): 노드마다 독립 버킷.
+  - **적용**: REST 미들웨어(전 라우트). 버킷 클래스 — `/auth/*`=노드 전역(가입/로그인) · 인증=**유저별**(토큰 검증) · 미인증=전역 anon. 초과 시 **429** + `X-RateLimit-{Limit,Remaining,Reset}`·`Retry-After` 헤더. 판정 시각은 주입 clock(DST 결정론).
+  - `rest-api`: 신규 **`ratelimit`** 모듈(TokenBucket/RateRule/RateLimiter/미들웨어) + `AppState`에 `RateLimiter` 주입 + router 미들웨어. 유닛 +4, 통합 +1(429). (1.10→1.11)
+  - server: `RateLimiter::with_defaults`(auth 20 · user 120 · anon 60, refill 5/60/30) 주입. (1.2→1.3)
+- 문서(R2): decisions **D32** 구현 노트, `api/rest.md`(rate limit 구현됨). TODO 체크.
+- **라이브 검증**: 단일노드 — cli `scenario` 정상 통과(리미터가 정상 흐름 안 깸) + `/auth/pow-challenge` 30회 폭주 시 **정확히 20개 200 → 10개 429**, 429 응답에 `x-ratelimit-limit:20 / remaining:0 / reset`·`retry-after:1` 헤더 확인.
+- seam: 노드별 독립(전역 정밀 한도 아님, D32 근사) · 메시지 전송(gateway 서빙)·gateway WS는 미적용(후속) · 유저-해시 소유 노드 승격(b)은 후속.
+- 전 crate 테스트 합계 **121** (rest-api 20+4 · auth 13 · protocol 9 · node 20+2 · domain 18 · storage 12 · gateway 8 등). 마이그레이션 V1~V11(무DB 변경).
+
+## [1.30.0] - 2026-06-15
+### 새 기능
+- **가입 봇방지 PoW (Phase 4 진입, D18)** — Phase 1 잔여 항목이자 Phase 4 첫 항목. 가입 시 Proof-of-Work 해시 퍼즐을 풀어야 계정 생성.
+  - **stateless 멀티노드**: 챌린지를 서버에 저장하지 않고(DB-D5 휘발) **PASETO v4.local 토큰**으로 발급 — 난이도를 인증된 claim(`sub`)에 담아 위변조 차단 + 만료 내장. 어느 노드가 발급해도 공유 키(`POW_SECRET`)로 다른 노드가 검증(D14와 동일 철학).
+  - **알고리즘**: 클라가 `sha256(challenge || ":" || nonce)`의 **선행 0비트 ≥ 난이도**(기본 18)가 되는 nonce를 찾아 제출. 서버는 토큰 진위·만료 + (토큰에서 디코드한 인증된 난이도로) 해 검증. **퍼즐 해시만 수제(sha2), 챌린지 MAC은 검증 크레이트(pasetors)** — 수제 암호 금지(P6) 준수.
+  - `auth`: 신규 **`pow`** 모듈(`PowKeys` issue_challenge/verify + `solve`/`satisfies`/`leading_zero_bits` + `DEFAULT_DIFFICULTY`) + `AuthError::Pow`. 유닛 +6. (1.0→1.1)
+  - `rest-api`: **`GET /auth/pow-challenge`** 발급(`{challenge, difficulty}`) + **`POST /auth/register`가 `pow_challenge`+`pow_nonce` 필수 검증**(실패 400). `AppState`에 `PowKeys` 주입. 통합 +3. (1.9→1.10)
+  - server: `POW_SECRET` env 로드(없으면 생성, 멀티노드 경고) + 주입, `gen-keys`가 `POW_SECRET`도 발급. (1.1→1.2)
+  - `cli`: register가 챌린지 받기→풀기(`auth::pow::solve` 재사용, 알고리즘 단일 출처)→제출. `auth` 의존 추가. (1.9→1.10)
+- 문서(R2): decisions **D18** 구현 노트(stateless PASETO·P6 준수·seam), `api/rest.md`(pow-challenge + register PoW 필수), TODO PoW 항목 체크(Phase 1·4).
+- **e2e 검증**: 단일노드 `cli scenario` **PASS** — register가 PoW를 풀고 가입 → 길드 → WS READY → 메시지 전송 → MESSAGE_CREATE 수신까지 종단 통과. `GET /auth/pow-challenge`가 `v4.local.` 토큰 발급 확인.
+- seam: 챌린지 미저장(stateless) → 만료(PASETO 기본 1h)까지 같은 해 replay 가능(비용 게이트=난이도) · 로그인 PoW·rate limit(D32)은 후속.
+- 전 crate 테스트 합계 **116** (auth 13 · rest-api 19 · protocol 9 · node 20+2 · domain 18 · storage 12 · gateway 8 등). 마이그레이션 V1~V11(무DB 변경).
+
+## [1.29.0] - 2026-06-15
+### 새 기능
+- **크로스노드 유저 이벤트 라우팅 (Phase 3, D43)** — D40/D41이 남긴 마지막 seam을 닫는다: 유저 단위 이벤트(`RELATIONSHIP_ADD/_REMOVE`, `MESSAGE_ACK`)가 `UserEmitter`=`Hub`라 **이 노드 로컬 세션에만** 배달됐는데, 대상 유저가 다른 노드에 접속 중이어도 배달되도록 일반화.
+  - **디렉터리 재사용**: D42 `node::Presence`의 `user → 호스팅 노드 집합`을 **유저 위치 디렉터리**로 재사용(새 레지스트리 0). `Presence::nodes_for` 신설.
+  - **타깃 전송(broadcast 아님)**: presence는 친구 전체로 풀메시 broadcast하지만, 유저 이벤트는 수신자가 특정 유저라 **호스팅 노드에만** 보낸다. 로컬=`Hub::deliver`(detach 버퍼 세션 포함), 원격=노드별로 묶어 `USER_DELIVER`(wire 0x0202) 전송 → 수신 노드가 로컬 세션에 배달. `Hub::deliver`가 세션 없는 유저를 자동 스킵 → stale 디렉터리 무해.
+  - **어댑터**: gateway 신규 **`user_route::UserRouter`**(Hub+Presence+Router 결합)가 `UserEmitter` 구현 — `RealmEmitter`=Router(D39)와 대칭. server가 주입(Hub의 옛 UserEmitter 구현은 제거). **포트 시그니처 불변 → rest-api(relationship/read_state) 무변경.**
+  - `protocol`: **`USER_DELIVER`(0x0202)** wire(`t, payload, user_ids`) + 라운드트립. (1.3→1.4)
+  - `node`: `Presence::nodes_for`(디렉터리 조회) + `Router::send_to`(타깃 전송) + handle_inbound UserDeliver arm. 유닛 +1. (1.5→1.6)
+  - `gateway`: 신규 **`user_route`** 모듈(`UserRouter` + `deliver_user`) + Hub의 UserEmitter 구현 이전. 유닛 +2. (1.9→1.10)
+  - server: `UserRouter` 주입 + `run_inbound`이 `USER_DELIVER` 분기 처리. (1.0→1.1)
+- 문서(R2): decisions **D43**(크로스노드 유저 이벤트 라우팅) + D40/D41/D42/Q2/Q11 seam 갱신, `protocol/node-wire.md`(USER_DELIVER 바디), `api/gateway.md`(유저 emit 크로스노드)·`api/rest.md`·`docs/README.md`(D1~D43/Phase 3 완료) 동기화.
+- **라이브 검증 (2노드 mTLS)**: alice@node1·bob@node2 등록 → bob이 node2에서 listen → alice가 node1에서 친구 요청 → **bob이 크로스노드로 `RELATIONSHIP_ADD`(pending_in) 실시간 수신**(D43 이전엔 로컬 한정이라 미배달). mTLS 메시 양방향 연결·presence 디렉터리 전파 확인.
+- seam: 디렉터리는 **live(온라인) 세션**만 추적 → 원격 detach-grace 세션은 in-flight 미수신(RESUME/다음 READY로 복구) · 신규 노드 anti-entropy 없음(D42와 동일, Phase 5).
+- 전 crate 테스트 합계 **107** (protocol 9 · node 20+2 · domain 18 · storage 12 · rest-api 16 · gateway 8 등). 마이그레이션 V1~V11(무DB 변경).
+
 ## [1.28.0] - 2026-06-15
 ### 새 기능
 - **전역 presence (gossip, Phase 3, Q11/D12 → D42)** — 친구 온라인 여부. **D40/D41에서 남긴 크로스노드 유저 라우팅 seam을 닫는다**: Realm 무관 유저 이벤트를 풀메시 gossip broadcast + 로컬 친구 필터로 전 노드에 전파.

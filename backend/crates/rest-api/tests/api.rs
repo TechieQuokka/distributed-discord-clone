@@ -6,8 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use auth::TokenKeys;
+use auth::{PowKeys, TokenKeys};
 use axum::Router;
+use rest_api::ratelimit::{RateLimiter, RateRule};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::channel::{Channel, NewChannel};
@@ -56,6 +57,7 @@ struct Inner {
     reactions: HashSet<(u64, u64, String)>,     // (message, user, emoji)
     mentions: HashSet<(u64, u64)>,              // (message, user)
     read_states: HashMap<(u64, u64), (Option<u64>, i32)>, // (user, channel) → (last_read, mention_count)
+    totp: HashMap<u64, Vec<u8>>,                 // user → TOTP secret (D19)
 }
 
 #[derive(Default, Clone)]
@@ -103,6 +105,21 @@ impl UserRepository for MemStore {
     }
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepoError> {
         Ok(self.inner.lock().unwrap().users.get(&id.0.raw()).cloned())
+    }
+    async fn set_totp_secret(&self, id: UserId, secret: Option<&[u8]>) -> Result<(), RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        match secret {
+            Some(s) => {
+                g.totp.insert(id.0.raw(), s.to_vec());
+            }
+            None => {
+                g.totp.remove(&id.0.raw());
+            }
+        }
+        Ok(())
+    }
+    async fn totp_secret(&self, id: UserId) -> Result<Option<Vec<u8>>, RepoError> {
+        Ok(self.inner.lock().unwrap().totp.get(&id.0.raw()).cloned())
     }
 }
 
@@ -675,6 +692,7 @@ impl domain::emit::UserEmitter for RecordingUserEmitter {
 struct Harness {
     router: Router,
     keys: Arc<TokenKeys>,
+    pow: Arc<PowKeys>,
     store: Arc<MemStore>,
     snow: Arc<SnowflakeGenerator>,
     clock: Arc<ManualClock>,
@@ -684,7 +702,13 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        // 기존 테스트는 한도에 안 걸리게 lenient 리미터.
+        Self::with_ratelimit(RateLimiter::lenient())
+    }
+
+    fn with_ratelimit(ratelimit: RateLimiter) -> Self {
         let keys = Arc::new(TokenKeys::generate().unwrap());
+        let pow = Arc::new(PowKeys::generate().unwrap());
         let store = Arc::new(MemStore::default());
         let snow = Arc::new(SnowflakeGenerator::new(1));
         let clock = Arc::new(ManualClock::new(domain::id::EPOCH_MS + 1));
@@ -693,12 +717,14 @@ impl Harness {
         let state = AppState::new(
             Arc::clone(&store),
             Arc::clone(&keys),
+            Arc::clone(&pow),
+            Arc::new(ratelimit),
             Arc::clone(&snow),
             clock.clone() as Arc<dyn Clock>,
             Arc::clone(&emitter) as Arc<dyn domain::emit::RealmEmitter>,
             Arc::clone(&user_emitter) as Arc<dyn domain::emit::UserEmitter>,
         );
-        Self { router: rest_api::router(state), keys, store, snow, clock, emitter, user_emitter }
+        Self { router: rest_api::router(state), keys, pow, store, snow, clock, emitter, user_emitter }
     }
 
     /// 기록된 Realm emit 이벤트 이름 목록 (검증용).
@@ -747,6 +773,130 @@ async fn make_guild(h: &Harness, owner_tok: &str) -> (String, String) {
     let gid = body["id"].as_str().unwrap().to_string();
     let chan = body["channels"][0]["id"].as_str().unwrap().to_string();
     (gid, chan)
+}
+
+// ── 가입 봇방지 PoW (D18) ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn pow_challenge_endpoint_issues_token() {
+    let h = Harness::new();
+    let (st, body) = h.req("GET", "/auth/pow-challenge", None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["difficulty"].as_u64().unwrap() as u8, auth::pow::DEFAULT_DIFFICULTY);
+    assert!(body["challenge"].as_str().unwrap().starts_with("v4.local."));
+}
+
+#[tokio::test]
+async fn register_with_valid_pow_succeeds() {
+    let h = Harness::new();
+    // 빠른 테스트를 위해 낮은 난이도 챌린지를 직접 발급(엔드포인트와 같은 키) 후 푼다.
+    let challenge = h.pow.issue_challenge(8).unwrap();
+    let nonce = auth::pow::solve(&challenge, 8);
+    let (st, body) = h
+        .req(
+            "POST",
+            "/auth/register",
+            None,
+            Some(json!({
+                "username": "alice", "email": "a@x.io", "password": "password123",
+                "pow_challenge": challenge, "pow_nonce": nonce,
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "register: {body}");
+    assert!(body["access_token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn register_without_valid_pow_rejected() {
+    let h = Harness::new();
+    let (st, _) = h
+        .req(
+            "POST",
+            "/auth/register",
+            None,
+            Some(json!({
+                "username": "bob", "email": "b@x.io", "password": "password123",
+                "pow_challenge": "v4.local.not-a-real-token", "pow_nonce": "0",
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "가짜 PoW는 가입 거부");
+}
+
+#[tokio::test]
+async fn rate_limit_returns_429_after_capacity() {
+    // auth 버킷 용량 2 (clock 고정이라 리필 없음) → 3번째 요청은 429.
+    let mut rules = HashMap::new();
+    rules.insert("auth", RateRule { capacity: 2.0, refill_per_sec: 1.0 });
+    let rl = RateLimiter::from_rules(rules, RateRule { capacity: 1e9, refill_per_sec: 1e9 });
+    let h = Harness::with_ratelimit(rl);
+
+    let (s1, _) = h.req("GET", "/auth/pow-challenge", None, None).await;
+    let (s2, _) = h.req("GET", "/auth/pow-challenge", None, None).await;
+    let (s3, _) = h.req("GET", "/auth/pow-challenge", None, None).await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS, "용량 초과 → 429 (D32)");
+}
+
+// ── TOTP MFA (D19) ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mfa_enable_verify_then_login_requires_totp() {
+    let h = Harness::new();
+    let now = h.clock.now_ms() / 1000; // 고정 clock → enable/verify/login 코드 시각 동일.
+
+    // 1) 가입(PoW)으로 실제 password_hash + 토큰 확보.
+    let challenge = h.pow.issue_challenge(8).unwrap();
+    let nonce = auth::pow::solve(&challenge, 8);
+    let (st, body) = h
+        .req(
+            "POST",
+            "/auth/register",
+            None,
+            Some(json!({
+                "username": "mfauser", "email": "m@x.io", "password": "password123",
+                "pow_challenge": challenge, "pow_nonce": nonce,
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "register: {body}");
+    let token = body["access_token"].as_str().unwrap().to_string();
+
+    // 2) enable → secret(hex) + otpauth URI (아직 미저장).
+    let (st, en) = h.req("POST", "/auth/mfa/totp/enable", Some(&token), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let secret_hex = en["secret"].as_str().unwrap().to_string();
+    assert!(en["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+
+    // 3) 인증 앱 대역으로 코드 생성 → verify(저장=활성).
+    let secret = auth::totp::decode_hex(&secret_hex).unwrap();
+    let code = auth::totp::generate(&secret, now).unwrap();
+    let (st, _) = h
+        .req("POST", "/auth/mfa/totp/verify", Some(&token), Some(json!({ "secret": secret_hex, "code": code })))
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "verify activates MFA");
+
+    // 4) 이제 비번 로그인은 토큰 대신 mfa_required.
+    let (st, lg) = h.req("POST", "/auth/login", None, Some(json!({ "username": "mfauser", "password": "password123" }))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(lg["mfa_required"], json!(true), "MFA 활성 → 비번만으론 토큰 없음");
+    assert!(lg["access_token"].is_null());
+
+    // 5) 2단계: 비번 + TOTP 코드 → 토큰 발급.
+    let code2 = auth::totp::generate(&secret, now).unwrap();
+    let (st, tk) = h
+        .req("POST", "/auth/mfa/totp", None, Some(json!({ "username": "mfauser", "password": "password123", "code": code2 })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "2단계 통과: {tk}");
+    assert!(tk["access_token"].as_str().is_some());
+
+    // 6) 틀린 코드는 거부.
+    let (st, _) = h
+        .req("POST", "/auth/mfa/totp", None, Some(json!({ "username": "mfauser", "password": "password123", "code": "000000" })))
+        .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "틀린 TOTP 거부");
 }
 
 #[tokio::test]

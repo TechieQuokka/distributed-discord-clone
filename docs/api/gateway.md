@@ -118,11 +118,11 @@ S ──RESUMED(s=현재 last seq)──▶ C
 
 > 이벤트 페이로드 `d`는 해당 엔티티의 JSON (스키마 [../database/02-schema.md](../database/02-schema.md) 대응).
 
-### 구현 현황 (Phase 3, D39)
+### 구현 현황 (Phase 3, D39~D43)
 - 구현된 DISPATCH: `MESSAGE_CREATE` / `MESSAGE_UPDATE` / `MESSAGE_DELETE`, `MESSAGE_REACTION_ADD` / `_REMOVE`, `MESSAGE_ACK`(읽음, D41), `GUILD_MEMBER_ADD` / `_UPDATE` / `_REMOVE`, `CHANNEL_RECIPIENT_ADD` / `_REMOVE`(그룹DM 참가자 변동, D8), `RELATIONSHIP_ADD` / `_REMOVE`(친구·차단, D40), `PRESENCE_UPDATE`(전역 presence, D42), `READY`/`RESUMED`.
 - **PRESENCE_UPDATE**(D42): 친구가 온/오프라인 전이하면 그 친구를 둔 노드가 배달. payload `{ "user": { "id": "..." }, "status": "online"|"offline" }`. 크로스노드는 `PRESENCE_GOSSIP`(node-wire 0x0201) 풀메시 broadcast로 전파 → 각 노드가 로컬 친구에게 배달. **READY 스냅샷에 `presences`**(현재 온라인인 친구 목록) 포함. (idle/dnd 설정용 C→S op 3은 후속.)
 - **READY 스냅샷에 `read_states` 포함**(D41): `[{ "channel_id", "last_read_message_id"|null, "mention_count" }]`. `MESSAGE_ACK`(유저 emit, 본인 다른 기기 동기화) payload: `{ "channel_id", "message_id", "mention_count" }`.
-- **이벤트 emit 경로 2종**: ① Realm 단위(구독자표 D12, `RealmEmitter`) — 메시지/멤버/recipient. ② **유저 단위**(`UserEmitter`, D40) — 친구·차단 등 Realm 무관 이벤트를 대상 유저의 **이 노드 로컬 세션**에 직접 배달. 크로스노드 유저 라우팅은 전역 presence/gossip(Q11) seam.
+- **이벤트 emit 경로 2종**: ① Realm 단위(구독자표 D12, `RealmEmitter`) — 메시지/멤버/recipient. ② **유저 단위**(`UserEmitter`, D40) — 친구·차단·읽음 등 Realm 무관 이벤트. **D43부터 크로스노드**: 로컬 세션은 `Hub`로, 다른 노드에 접속한 대상 유저는 `Presence` 디렉터리(D42)로 호스팅 노드를 찾아 `USER_DELIVER`(node-wire 0x0202)로 타깃 배달. (포트 시그니처 불변 → REST 라우트 무변경.)
 - `RELATIONSHIP_ADD` payload: `{ "user": { "id": "...", "username": "..." }, "kind": "pending_in"|"pending_out"|"friend"|"blocked" }` (수신자 관점). `RELATIONSHIP_REMOVE`: `{ "user": { "id": "..." } }`.
 - DM/그룹DM(D8)은 길드와 **동일한 자동구독(D13)·팬아웃 경로**를 탄다 — DM Realm에 입장(=멤버)이면 READY가 그 realm을 자동구독해 `MESSAGE_CREATE` 등을 그대로 수신(별도 분기 없음, P4). `CHANNEL_RECIPIENT_*`는 멤버 이벤트와 같은 범용 envelope·RealmEmitter로 팬아웃:
 ```json

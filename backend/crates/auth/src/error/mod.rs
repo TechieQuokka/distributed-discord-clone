@@ -6,4 +6,6 @@ pub enum AuthError {
     Hash(String),
     #[error("token error: {0}")]
     Token(String),
+    #[error("proof-of-work error: {0}")]
+    Pow(String),
 }

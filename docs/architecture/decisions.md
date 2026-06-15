@@ -3,7 +3,7 @@
 > Discord 클론 — 공부 + 포트폴리오용. 로컬 전용, 이론 확립.
 > 철학: **"공부는 실전처럼"** — 실제로 수만 명을 붙이진 않지만, *수만 동접을 감당할 수 있는 구조*로 설계하고 로컬 시뮬레이션으로 증명한다.
 >
-> 최종 갱신: 2026-06-15 (D42 전역 presence까지)
+> 최종 갱신: 2026-06-15 (D43 + Phase 4 인증/봇방지 구현: PoW D18 · rate limit D32 · TOTP MFA D19)
 
 ---
 
@@ -154,10 +154,12 @@
 ### D18. 봇방지 = PoW 챌린지 + Rate limit
 - 가입/로그인 시 **Proof-of-Work 해시 퍼즐**(hashcash/mCaptcha/Anubis 스타일) — 제3자 의존 0, 수제 구현.
 - **Rate limiting = Token Bucket** (per-route/per-user/global). ← 기존 Q5 흡수.
+- **PoW 구현(Phase 4)**: `auth::pow`. **stateless 멀티노드** — 챌린지를 서버에 저장하지 않고(DB-D5 휘발) **PASETO v4.local 토큰**(대칭 인증·암호화 + 만료 내장)으로 발급, 난이도를 인증된 claim(`sub`)에 담아 위변조 차단. 클라는 `sha256(challenge || ":" || nonce)`의 **선행 0비트 ≥ 난이도**가 되는 nonce를 찾아 제출. 서버는 토큰 진위·만료 + (토큰에서 디코드한 인증된 난이도로) 해 검증. **퍼즐 해시만 수제(sha2), 챌린지 MAC은 검증 크레이트(pasetors)** — 수제 암호 금지(P6) 준수. 멀티노드는 `POW_SECRET` 공유(D14와 동일 철학, `server gen-keys`가 발급). `GET /auth/pow-challenge` 발급 → `POST /auth/register`가 `pow_challenge`+`pow_nonce` 필수 검증(실패 400). **seam**: 챌린지 저장 안 함 → 만료(PASETO exp 기본 1h)까지 같은 해 replay 가능(비용 게이트는 난이도). rate limit(D32)·로그인 PoW는 후속.
 
 ### D19. MFA = TOTP 코어 + Passkeys 스트레치
 - **TOTP (RFC 6238)** 우선 구현.
 - **WebAuthn/Passkeys** 는 여유 시 스트레치 목표.
+- **구현(Phase 4)**: `auth::totp`(검증 크레이트 `totp-rs`, P6 — SHA1·6자리·30s·skew1). secret(raw)은 `users.mfa_totp_secret`(BYTEA, V1에 이미 존재 → 마이그레이션 0), 민감값이라 `User` 엔티티엔 안 싣고 전용 포트(`UserRepository::{set_totp_secret, totp_secret}`). **흐름**: `POST /auth/mfa/totp/enable`(secret+otpauth URI 발급, **미저장**) → `verify`(secret+code 확인 시 저장=활성, **락아웃 방지** — 미확인 secret로 안 잠김) → `disable`(코드 확인 후 제거). 로그인은 MFA 활성 유저면 토큰 대신 `{mfa_required:true}` → `POST /auth/mfa/totp`(비번 재확인 + 코드)로 토큰 발급. 시각은 주입 clock(now_unix). cli `mfa-enable/mfa-verify/mfa-login/totp-code`(코드 생성=인증앱 대역). **라이브 e2e 검증**(enable→verify→login mfa_required→2단계 토큰, 틀린 코드 401). seam: 로그인 2단계는 비번 재제출(ticket 미사용) · 백업코드(`mfa_backup_codes`)·WebAuthn은 후속(Phase 5).
 
 ### D20. 입력·세션 하이젠
 - **SQL = 파라미터 바인딩만** (문자열 조립 금지).
@@ -259,6 +261,7 @@
 ### D32. 분산 Rate limiting = per-node 근사 시작
 - 토큰 버킷을 **노드별 로컬 보유**(근사). 로컬 노드 3~10개에선 누수 미미.
 - 정밀도가 꼭 필요한 엔드포인트만 **유저-해시 소유 노드 집중관리(b)**로 후속 승격.
+- **구현(Phase 4)**: `rest-api::ratelimit`. 순수 `TokenBucket`(용량+초당 리필, 연속 토큰) + per-node `RateLimiter`(`rule:identity`별 버킷, **인메모리 DB-D5 휘발**) + axum 미들웨어. 버킷 클래스: `/auth/*`=노드 전역(가입/로그인, PoW(D18)와 상보적) · 그 외 인증=유저별(토큰 검증) · 미인증=전역 anon. 초과 시 **429** + `X-RateLimit-{Limit,Remaining,Reset}`/`Retry-After` 헤더(rest.md §0). 시각은 주입 clock(DST 결정론). server가 `with_defaults`(auth 20·user 120·anon 60) 주입, 테스트는 `lenient`/`from_rules`. **라이브 검증**: cli scenario 정상 통과 + pow-challenge 폭주 시 정확히 20개 통과→429. **seam**: 노드별 독립이라 전역 정밀 한도 아님(D32 근사) · 메시지 전송(gateway 서빙)·gateway WS는 아직 미적용(후속) · 유저-해시 승격(b)은 후속.
 
 ### D33. 합의(consensus) 레이어 = 없음 (명시적 경계)
 - **Raft 등 합의 없음.** 정적 config 해시링을 모든 노드가 신뢰.
@@ -297,14 +300,14 @@
 - **데이터 (Phase 3 구현)**: Discord식 **방향성 행** `relationships(user_id, target_id, kind)` (02-schema §6, wire V10). A↔B 친구 = 양쪽 행 2개. kind = `friend`/`pending_in`/`pending_out`/`blocked`. 친구 요청 = 내 행 `pending_out`/상대 `pending_in` → 수락 시 양쪽 `friend`. 차단 = 내 행 `blocked` + 상대 행 제거. 상태 전이의 원자성(두 행)은 storage 트랜잭션(`RelationshipRepository`).
 - **차단 강제 (permissions.md §5 seam 닫힘)**: 어느 한쪽이라도 차단 시 **1:1 DM 열기·전송 거부**(rest-api `open_channel` + gateway `can_send`의 1:1 DM 분기에서 `is_blocked_between` 검사). 그룹DM엔 미적용(Discord 동일).
 - **유저 단위 이벤트 emit (`UserEmitter`) — D12의 "팬아웃 ↔ 전역 presence 분리"의 실체**: 친구·차단(`RELATIONSHIP_ADD/_REMOVE`)은 Realm 무관 전역 유저 이벤트라 구독자표(D12) 기반 `RealmEmitter`(D39)로 보낼 수 없다 → 별도 **`UserEmitter` 포트**(domain `emit`)를 둔다. 구현(adapter) = gateway `Hub`(대상 유저의 **이 노드 로컬 세션**에 배달), server가 rest-api `AppState`에 주입(`RealmEmitter`와 대칭).
-  - ⚠ **seam**: 대상 유저가 **다른 노드**에 접속 중이면 현재 미배달(로컬 한정). 크로스노드 유저 라우팅 = 전역 presence/gossip(Q11) 도입 후. Realm 이벤트는 구독자표로 크로스노드가 되지만 유저-전역 라우팅은 아직 없다(단일노드/동일노드에선 정상).
+  - ⚠ **seam → D43에서 해소**: 도입 당시엔 대상 유저가 **다른 노드**에 접속 중이면 미배달(로컬 한정)이었다. **D43**이 `Presence` 디렉터리(D42, user→호스팅 노드)를 라우팅 키로 `USER_DELIVER`를 타깃 노드에 보내 크로스노드 배달을 닫았다. (Realm 이벤트는 구독자표로 이미 크로스노드.)
 
 ### D41. 읽음 상태(read_states) + 미읽음 멘션 카운트
 - **데이터 (Phase 3 구현)**: `read_states(user_id, channel_id, last_read_message_id, mention_count)` (02-schema §8, wire V11). 채널별 "어디까지 읽었나" + 안 읽은 멘션 수. `last_read_message_id`는 FK 없음(messages는 Phase 4 파티셔닝 대상 — attachments/reactions와 동일 방침).
 - **mention_count 유지 전략 (자문자답)**: 매 조회 시 전체 카운트 = 비쌈. 매 메시지마다 갱신 = 핫패스 비용. → **증분 유지 + ack 시 재계산** 하이브리드:
   - 멘션 발생 시(dispatch가 `message_mentions` 적재 직후) 대상들의 `mention_count` **+1**(`bump_mentions`, 작성자 제외, 존재 유저만 upsert). 새 메시지는 항상 최신 → 단순 증가가 정확.
   - **ack**(`POST /channels/:cid/messages/:mid/ack`) 시 `last_read`=mid + `mention_count`를 **그 이후(`m.id > last_read`) 살아있는 멘션 수로 재계산**(한 문장 upsert). 증분 누적 오차를 ack가 정정.
-- **실시간 `MESSAGE_ACK`**: 한 유저의 여러 기기 동기화용 → Realm 무관 유저 이벤트라 **`UserEmitter`(D40) 재사용**(본인 세션들에 배달). READY 스냅샷에 `read_states` 포함(자동구독 D13 시점에 상태 확보). 크로스노드 유저 라우팅 seam은 D40과 동일(Q11).
+- **실시간 `MESSAGE_ACK`**: 한 유저의 여러 기기 동기화용 → Realm 무관 유저 이벤트라 **`UserEmitter`(D40) 재사용**(본인 세션들에 배달). READY 스냅샷에 `read_states` 포함(자동구독 D13 시점에 상태 확보). 크로스노드 유저 라우팅 seam은 D40과 함께 **D43에서 해소**(여러 기기가 다른 노드에 흩어져도 ACK 동기화됨).
 
 ### D42. 전역 presence = gossip broadcast + 로컬 친구 필터 (Q11/D12 해소)
 - **문제 (D12 §"팬아웃 ↔ 전역 presence 분리"의 미정 갈래, Q11)**: 친구 온라인 여부는 Realm 무관 전역 유저 상태 → 구독자표(D12) 팬아웃으로 못 보낸다. D40/D41의 `UserEmitter`도 **로컬 노드 세션에만** 배달돼 크로스노드 미배달 seam이 있었다.
@@ -313,8 +316,18 @@
   - **전이 기준 = live 세션**: 유저의 첫 live(소켓 연결) 세션에서 online, 마지막 live 세션 종료에서 offline(`Hub::live_count`). detach(버퍼만 남음)는 offline로 안 침 → RESUME 유예와 일관.
   - **전파**: 전이 시 `PRESENCE_GOSSIP{user, node, status}`(wire 0x0201)을 **모든 피어에 broadcast**(`Router::broadcast`). 각 노드는 자기 view 갱신 후, 그 유저의 친구(relationships, D40) 중 **로컬 세션 보유자**에게 `PRESENCE_UPDATE` 배달(`Hub::deliver`가 로컬 없는 유저 자동 스킵). 수신 노드는 **재브로드캐스트 안 함**(원본이 풀메시로 이미 전 피어에 전송 → 루프·증폭 방지). READY 스냅샷에 친구 presence 포함.
   - **친구 산출 = relationships 재사용**: 새 repo/포트 없이 `list_relationships(user) filter friend`로 대상 산출 → domain/storage/rest-api 무변경(친구 그래프가 presence 라우팅 키).
-- **이것이 닫는 것**: D40(RELATIONSHIP_*)·D41(MESSAGE_ACK)의 크로스노드 유저 라우팅도 같은 gossip 메커니즘으로 일반화 가능(현재는 presence만 broadcast; 후속에 다른 유저 이벤트도 동일 경로로).
+- **이것이 닫는 것**: D40(RELATIONSHIP_*)·D41(MESSAGE_ACK)의 크로스노드 유저 라우팅 → **D43**이 구현. 단 presence의 **풀메시 broadcast**가 아니라 Presence **디렉터리로 타깃 노드에만** `USER_DELIVER` 전송(수신자가 특정 유저라 broadcast 불필요). 같은 디렉터리를 공유하는 상보적 두 패턴.
 - **남은 seam**: 신규 노드 join 시 과거 presence 동기화(anti-entropy/SWIM) 없음(델타 only, Phase 5 gossip discovery와 함께) · idle/dnd 클라 op(3) · 전 노드 동시 재시작 시 presence 리셋(휘발).
+
+### D43. 크로스노드 유저 이벤트 라우팅 = Presence 디렉터리 기반 타깃 전송 (D40/D41 seam 닫음)
+- **문제**: D40(`RELATIONSHIP_ADD/_REMOVE`)·D41(`MESSAGE_ACK`)은 `UserEmitter`(Realm 무관 유저 이벤트 포트)를 통해 통지되는데, 구현(adapter)이 gateway `Hub`라 **이 노드의 로컬 세션에만** 배달됐다. 대상 유저가 다른 노드에 접속 중이면(친구 요청 실시간 수신, 다기기 ACK 동기화) 미배달. D42 presence는 풀메시 broadcast로 크로스노드를 뚫었지만 그건 presence 델타에 한정.
+- **핵심 관찰**: D42가 만든 `node::Presence` 레지스트리는 `user → (status, 호스팅 노드 집합)`을 이미 보유 → 이게 곧 **"유저 X가 어느 노드에 있나"를 답하는 유저 위치 디렉터리**다. 새 레지스트리 없이 라우팅 키로 재사용한다.
+- **결정**: `UserEmitter`를 **크로스노드 인지 어댑터**로 일반화한다. presence처럼 전 노드에 broadcast하지 **않고**, 대상 유저별로 Presence 디렉터리에서 호스팅 노드를 조회해 **그 노드에만 타깃 전송**한다(수신자가 특정 유저라 풀메시 불필요 — presence와 상보적). 포트 시그니처(`emit_to_users`)는 불변이라 **rest-api 라우트(relationship/read_state)는 무변경**, server가 주입하는 *구현*만 교체.
+  - **로컬**: 대상 유저의 이 노드 세션에 `Hub::deliver`(detach 중 버퍼 세션도 포함 → RESUME 복구).
+  - **원격**: 대상 유저를 호스팅하는 (로컬 제외) 노드별로 묶어 `USER_DELIVER{t, payload, user_ids}`(wire 0x0202) 전송 → 수신 노드가 `Hub::deliver`로 자기 로컬 세션에 배달.
+  - **어댑터 위치**: gateway `user_route::UserRouter`(Hub + `Arc<Presence>` + `Arc<Router>` 결합) — `RealmEmitter`=Router와 대칭. `Router::send_to`(타깃 노드 1개 전송) + `Presence::nodes_for` 신설.
+- **견고성**: `Hub::deliver`는 로컬 세션 없는 유저를 자동 스킵 → 디렉터리가 약간 stale해도 **무해(no-op)**. 디렉터리에 없는 유저(오프라인)는 어차피 받을 세션이 없어 정상 드롭.
+- **남은 seam**: 디렉터리는 **live(온라인) 세션**만 추적 → 원격 노드에서 detach-grace 중인 세션은 in-flight 이벤트를 못 받음(RESUME/다음 READY 스냅샷으로 상태 확보) · 신규 노드 anti-entropy 없음(D42와 동일, Phase 5).
 
 ---
 
@@ -347,7 +360,7 @@
 ## 5. 열린 질문 (Open Questions) — 아직 안 정함
 
 - [x] ~~**Q1. 기능 컷라인 / Voice**~~ → D21 + §4-R 로드맵으로 해결.
-- [x] ~~**Q2. 공유 상태 위치 (팬아웃)**~~ → D12로 해결 (Realm-local). **남은 갈래: 전역 presence 메커니즘 미정** (gossip 후보).
+- [x] ~~**Q2. 공유 상태 위치 (팬아웃)**~~ → D12로 해결 (Realm-local). 전역 presence → **D42**(gossip broadcast), 크로스노드 유저 이벤트 라우팅 → **D43**(Presence 디렉터리 타깃 전송)으로 잔여 갈래 모두 해결.
 - [x] ~~**Q3. 메시지 저장 스키마**~~ → D28로 해결.
 - [x] ~~**Q4. 인증 방식**~~ → D14/D19로 해결 (PASETO+refresh, TOTP). 남은 갈래: OAuth2/봇토큰 범위는 Q1 기능 컷라인과 함께.
 - [x] ~~**Q5. Rate limiting**~~ → D18로 해결 (Token Bucket).
@@ -359,7 +372,7 @@
 - [ ] **Q7. 액터 supervisor/재시작 전략** (D23이 큰 틀, 세부는 Phase 2).
 - [x] ~~**Q9. CLI 시나리오 스크립트 포맷**~~ → 해결: CLI `scenario` 서브커맨드(헤드리스 종단 자동 검증 — 가입→길드→WS구독→전송→MESSAGE_CREATE 수신, PASS/FAIL+exit code). 별도 스크립트 DSL 없이 코드 시나리오로 시작, 필요 시 후속 확장.
 - [ ] **Q10. 검색 구현** — Postgres FTS 유력, Phase 4.
-- [ ] **Q11. gossip discovery + 전역 presence** (D5/Q2 후속, Phase 3/5).
+- [~] **Q11. gossip discovery + 전역 presence** — 전역 presence=**D42**, 크로스노드 유저 라우팅=**D43** 완료. 남은 것: **gossip discovery(SWIM 동적 노드 합류·presence anti-entropy)** = Phase 5.
 
 ---
 

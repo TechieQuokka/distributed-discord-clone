@@ -1,7 +1,7 @@
 # TODO
 
 > 분산 Discord 클론 — 작업 추적. 설계 출처: [docs/architecture/decisions.md](docs/architecture/decisions.md).
-> 현재 단계: **Phase 3 (Discord 본체) 완료** (v1.28.0) → Phase 4 진입 예정. 로드맵 = D §4-R. 이어서 → RESUME.md.
+> 현재 단계: **Phase 3 완료** + **Phase 4 진행** (v1.32.0, 인증/봇방지 묶음 PoW·rate limit·TOTP 완료) → 나머지 Phase 4(스레드/검색/첨부/파티셔닝/웹훅/감사로그). 로드맵 = D §4-R. 이어서 → RESUME.md.
 
 범례: `[ ]` 미착수 · `[~]` 진행중 · `[x]` 완료
 
@@ -13,7 +13,7 @@
 
 ## 📄 문서화 (Docs) — 진행중
 
-- [x] 아키텍처 결정 원장 (decisions.md, D1~D42)
+- [x] 아키텍처 결정 원장 (decisions.md, D1~D43)
 - [x] DB 설계 문서군 (overview / schema / erd / partitioning)
 - [x] 설계 토론 기록 (design-discussion.md)
 - [x] 문서 인덱스 (docs/README.md)
@@ -44,7 +44,7 @@
 ## Phase 1 — MVP 메시징 (단일노드)
 
 - [x] 가입/로그인 — Argon2id(D15) + PASETO access + refresh(D14)  # auth crate 프리미티브 완료, REST/storage 흐름 배선 TODO
-- [ ] PoW 가입 챌린지 기초 (D18) *(또는 Phase 4로)*
+- [x] PoW 가입 챌린지 기초 (D18)  # Phase 4에서 구현: auth::pow + /auth/pow-challenge + register 검증
 - [x] WS Gateway — 연결 수명주기(IDENTIFY→READY→HEARTBEAT)  # RESUME 재생버퍼는 Phase 2
 - [x] 길드 생성 / 텍스트 채널 생성
 - [x] 메시지 송수신 (persist-then-fanout, 단일노드, D24)
@@ -89,9 +89,9 @@
 - [ ] 감사 로그 (audit_log)
 - [ ] 검색 — Postgres FTS (Q10)
 - [ ] 파일 첨부 — 로컬 FS (D37)
-- [ ] TOTP MFA (D19)
-- [ ] PoW 봇방지 정식 (D18)
-- [ ] Rate limit — Token Bucket per-node (D32)
+- [x] TOTP MFA (D19)  # auth::totp(totp-rs) + enable/verify/disable + login 2단계, 라이브 e2e. 백업코드·WebAuthn은 Phase 5
+- [x] PoW 봇방지 정식 (D18)  # stateless PASETO v4.local 챌린지 + sha256 선행0비트, cli scenario e2e. 로그인 PoW는 후속
+- [x] Rate limit — Token Bucket per-node (D32)  # rest-api::ratelimit 미들웨어, 429+X-RateLimit 헤더, 라이브 검증. 메시지/WS·유저해시 승격은 후속
 - [ ] **메시지 시간 RANGE 파티셔닝** 전환 (D28, 04 문서)
 
 ---

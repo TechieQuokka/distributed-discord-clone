@@ -35,6 +35,17 @@ pub trait UserRepository: Send + Sync {
         &self,
         id: UserId,
     ) -> impl Future<Output = Result<Option<User>, RepoError>> + Send;
+    /// TOTP secret 설정/해제 (D19). `None`=비활성화. 민감값이라 `User` 엔티티엔 안 싣고 전용 경로.
+    fn set_totp_secret(
+        &self,
+        id: UserId,
+        secret: Option<&[u8]>,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+    /// TOTP secret 조회 (없으면 MFA 미설정).
+    fn totp_secret(
+        &self,
+        id: UserId,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, RepoError>> + Send;
 }
 
 /// Refresh 토큰 저장소 port (D14). 회전 + 재사용 탐지.

@@ -1,6 +1,6 @@
 [package]
 name = "storage"
-version = "1.9.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+version = "1.10.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
 edition = "2024"
 license = "MIT"
 

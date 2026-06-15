@@ -24,6 +24,14 @@ enum Command {
     Register(RegisterArgs),
     Login(LoginArgs),
     Refresh(RefreshArgs),
+    /// TOTP MFA 활성화 시작 → secret(hex) + otpauth URI 출력 (D19).
+    MfaEnable(TokenArgs),
+    /// TOTP secret+code 확인 → MFA 활성화.
+    MfaVerify(MfaVerifyArgs),
+    /// MFA 로그인 2단계 (비번 + TOTP 코드).
+    MfaLogin(MfaLoginArgs),
+    /// TOTP 현재 코드 계산 (secret hex — 인증 앱 대역, 테스트용).
+    TotpCode(TotpCodeArgs),
     /// 길드 생성 (기본 'general' 채널 포함).
     CreateGuild(CreateGuildArgs),
     /// 텍스트 채널 생성 (MANAGE_CHANNELS 필요).
@@ -102,6 +110,31 @@ struct LoginArgs {
 struct RefreshArgs {
     #[arg(long)]
     token: String,
+}
+#[derive(Args)]
+struct MfaVerifyArgs {
+    #[arg(long)]
+    token: String,
+    /// enable에서 받은 secret(hex).
+    #[arg(long)]
+    secret: String,
+    #[arg(long)]
+    code: String,
+}
+#[derive(Args)]
+struct MfaLoginArgs {
+    #[arg(long)]
+    username: String,
+    #[arg(long)]
+    password: String,
+    #[arg(long)]
+    code: String,
+}
+#[derive(Args)]
+struct TotpCodeArgs {
+    /// TOTP secret(hex).
+    #[arg(long)]
+    secret: String,
 }
 #[derive(Args)]
 struct CreateGuildArgs {
@@ -342,8 +375,39 @@ async fn main() -> std::process::ExitCode {
 
     let result = match &cli.command {
         Command::Register(a) => rest::register(&base, &a.username, &a.email, &a.password).await.map(print_auth),
-        Command::Login(a) => rest::login(&base, &a.username, &a.password).await.map(print_auth),
+        Command::Login(a) => match rest::login(&base, &a.username, &a.password).await {
+            Ok(rest::LoginOutcome::Tokens(t)) => {
+                print_auth(t);
+                Ok(())
+            }
+            Ok(rest::LoginOutcome::MfaRequired) => {
+                println!("🔐 MFA required — `mfa-login`으로 TOTP 코드 제출");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
         Command::Refresh(a) => rest::refresh(&base, &a.token).await.map(print_auth),
+        Command::MfaEnable(a) => rest::mfa_enable(&base, &a.token).await.map(|v| {
+            println!("✅ MFA setup (verify 전 — 저장 안 됨)");
+            println!("  secret(hex) = {}", v.secret);
+            println!("  otpauth_uri = {}", v.otpauth_uri);
+        }),
+        Command::MfaVerify(a) => {
+            rest::mfa_verify(&base, &a.token, &a.secret, &a.code).await.map(|_| println!("✅ MFA enabled"))
+        }
+        Command::MfaLogin(a) => {
+            rest::mfa_login(&base, &a.username, &a.password, &a.code).await.map(print_auth)
+        }
+        Command::TotpCode(a) => (|| {
+            let secret = auth::totp::decode_hex(&a.secret).map_err(|e| e.to_string())?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            let code = auth::totp::generate(&secret, now).map_err(|e| e.to_string())?;
+            println!("{code}");
+            Ok(())
+        })(),
         Command::CreateGuild(a) => rest::create_guild(&base, &a.token, &a.name).await.map(|g| {
             println!("✅ guild created");
             println!("  id       = {}", g.id);
