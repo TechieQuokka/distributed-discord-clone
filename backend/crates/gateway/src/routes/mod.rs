@@ -9,7 +9,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use domain::id::{ChannelId, Snowflake};
+use domain::id::{ChannelId, MessageId, Snowflake};
 use domain::repo::Store;
 use serde::{Deserialize, Serialize};
 use transport::NodeTransport;
@@ -37,6 +37,8 @@ async fn ws_upgrade<S: Store + 'static, T: NodeTransport>(
 struct SendMessageReq {
     content: String,
     nonce: Option<String>,
+    /// 답장 대상 메시지 id (문자열, D39). 같은 채널의 살아있는 메시지여야.
+    reference_message_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -72,10 +74,45 @@ async fn send_message<S: Store + 'static, T: NodeTransport>(
         return Err((StatusCode::FORBIDDEN, "missing SEND_MESSAGES"));
     }
 
+    // 1:1 DM 차단 게이팅 (permissions.md §5): 어느 한쪽이라도 차단했으면 전송 거부.
+    if channel.kind == domain::channel::ChannelKind::Dm {
+        let db = |_| (StatusCode::INTERNAL_SERVER_ERROR, "db error");
+        if let Some(info) = state.store.get_realm(channel.realm_id).await.map_err(db)?
+            && info.kind == domain::dm::RealmKind::Dm
+        {
+            for m in state.store.list_members(channel.realm_id).await.map_err(db)? {
+                if m.user_id != user && state.store.is_blocked_between(user, m.user_id).await.map_err(db)? {
+                    return Err((StatusCode::FORBIDDEN, "blocked"));
+                }
+            }
+        }
+    }
+
+    // 답장 대상 검증 (D39): 같은 채널의 살아있는 메시지여야.
+    let reference_message_id = match &req.reference_message_id {
+        Some(s) => {
+            let rid = s
+                .parse::<u64>()
+                .map(|n| MessageId(Snowflake::from_raw(n)))
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid reference_message_id"))?;
+            let refd = state
+                .store
+                .get_message(rid)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+                .ok_or((StatusCode::BAD_REQUEST, "reference message not found"))?;
+            if refd.channel_id != channel_id {
+                return Err((StatusCode::BAD_REQUEST, "reference message in different channel"));
+            }
+            Some(rid)
+        }
+        None => None,
+    };
+
     // Router로 전달 → Realm 액터가 ID·순서 확정 → dispatch 드라이버가 persist+fanout.
     state
         .router
-        .route_send(channel.realm_id, channel_id, user, req.content, req.nonce.clone())
+        .route_send(channel.realm_id, channel_id, user, req.content, req.nonce.clone(), reference_message_id)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "route failed"))?;
 

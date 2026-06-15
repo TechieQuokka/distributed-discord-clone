@@ -7,8 +7,8 @@ use std::sync::Arc;
 use auth::TokenKeys;
 use domain::id::SnowflakeGenerator;
 use domain::repo::Store;
-use node::Router;
 use node::clock::Clock;
+use node::{Presence, Router};
 use transport::NodeTransport;
 
 use crate::hub::Hub;
@@ -20,6 +20,8 @@ pub struct GatewayState<S: Store, T: NodeTransport> {
     pub snowflakes: Arc<SnowflakeGenerator>,
     pub clock: Arc<dyn Clock>,
     pub hub: Hub,
+    /// 전역 presence 레지스트리 (Q11/D12) — server가 소유, inbound gossip 루프와 공유.
+    pub presence: Arc<Presence>,
     pub local_node_id: u64,
     /// 하트비트 권고 주기(ms) — HELLO로 클라에 안내.
     pub heartbeat_interval_ms: u64,
@@ -34,6 +36,7 @@ impl<S: Store, T: NodeTransport> Clone for GatewayState<S, T> {
             snowflakes: Arc::clone(&self.snowflakes),
             clock: Arc::clone(&self.clock),
             hub: self.hub.clone(),
+            presence: Arc::clone(&self.presence),
             local_node_id: self.local_node_id,
             heartbeat_interval_ms: self.heartbeat_interval_ms,
         }

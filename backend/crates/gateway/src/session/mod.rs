@@ -21,19 +21,23 @@ enum Handshake {
     Resume { session_id: u64, token: String, seq: u64 },
 }
 
-/// READY 페이로드(초기 스냅샷). session_id + resume_token(D20) + user + realm id 목록.
+/// READY 페이로드(초기 스냅샷). session_id + resume_token(D20) + user + realm id 목록 + 읽음 상태 + 친구 presence.
 fn ready_payload(
     session_id: u64,
     resume_token: &str,
     user_id: u64,
     username: Option<&str>,
     realms: &[u64],
+    read_states: Vec<Value>,
+    presences: Vec<Value>,
 ) -> Value {
     json!({
         "session_id": session_id.to_string(),
         "resume_token": resume_token,
         "user": { "id": user_id.to_string(), "username": username },
         "realms": realms.iter().map(|r| json!({ "id": r.to_string() })).collect::<Vec<_>>(),
+        "read_states": read_states,
+        "presences": presences,
     })
 }
 
@@ -79,10 +83,26 @@ async fn run_identify<S: Store + 'static, T: NodeTransport>(
 
     // READY (seq=1) — activate 이전이라 팬아웃과 경합 없음.
     let username = state.store.find_by_id(uid).await.ok().flatten().map(|u| u.username);
+    let read_states: Vec<Value> = state
+        .store
+        .list_read_states(uid)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "channel_id": s.channel_id.0.raw().to_string(),
+                "last_read_message_id": s.last_read_message_id.map(|m| m.0.raw().to_string()),
+                "mention_count": s.mention_count,
+            })
+        })
+        .collect();
+    // 친구 presence 스냅샷(현재 온라인 친구).
+    let presences = crate::presence::ready_presences(&*state.store, &state.presence, user_id).await;
     state.hub.dispatch_one(
         session_id,
         "READY",
-        ready_payload(session_id, &resume_token, user_id, username.as_deref(), &realm_ids),
+        ready_payload(session_id, &resume_token, user_id, username.as_deref(), &realm_ids, read_states, presences),
     );
 
     // 이제 팬아웃 대상으로 활성화 + Realm 구독.
@@ -90,9 +110,23 @@ async fn run_identify<S: Store + 'static, T: NodeTransport>(
     for r in &realm_ids {
         let _ = state.router.route_subscribe(rid(*r), uid, state.local_node_id).await;
     }
+    // presence 온라인 전이 (이 유저의 첫 live 세션일 때만 gossip+통지).
+    if state.hub.live_count(user_id) == 1 {
+        crate::presence::set_online(
+            &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, user_id,
+        )
+        .await;
+    }
 
     pump(&mut socket, &state, rx).await;
     state.hub.detach(session_id); // 끊김: 버퍼 유지(RESUME 대비). grace 후 Hub가 purge.
+    // 마지막 live 세션이 끊겼으면 presence 오프라인 전이.
+    if state.hub.live_count(user_id) == 0 {
+        crate::presence::set_offline(
+            &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, user_id,
+        )
+        .await;
+    }
 }
 
 /// 재개: Hub에서 토큰·seq 검증 → 놓친 프레임 재생 + RESUMED → 루프.
@@ -105,6 +139,7 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
 ) {
     match state.hub.resume(session_id, &token, last_seq, DEFAULT_REPLAY_CAP) {
         ResumeOutcome::Resumed { rx, replay, last_seq } => {
+            let user_id = state.hub.session_user(session_id);
             // 놓친 프레임 직접 재생(원래 seq 보존) → RESUMED.
             for frame in replay {
                 if send(&mut socket, frame).await.is_err() {
@@ -116,8 +151,25 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
                 state.hub.detach(session_id);
                 return;
             }
+            // 재개로 다시 live → 첫 live 세션이면 presence 온라인 전이(grace 중 offline됐던 경우 복귀).
+            if let Some(u) = user_id
+                && state.hub.live_count(u) == 1
+            {
+                crate::presence::set_online(
+                    &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, u,
+                )
+                .await;
+            }
             pump(&mut socket, &state, rx).await;
             state.hub.detach(session_id);
+            if let Some(u) = user_id
+                && state.hub.live_count(u) == 0
+            {
+                crate::presence::set_offline(
+                    &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, u,
+                )
+                .await;
+            }
         }
         ResumeOutcome::Invalid => {
             // 버퍼 밖/토큰 불일치 → 재IDENTIFY + REST 재조회 유도 (D24).

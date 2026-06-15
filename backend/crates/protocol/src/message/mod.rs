@@ -26,8 +26,10 @@ pub mod msg_type {
     pub const PONG: u16 = 0x0004;
     pub const REALM_SEND: u16 = 0x0101;
     pub const REALM_FANOUT: u16 = 0x0103;
+    pub const REALM_EMIT: u16 = 0x0104;
     pub const SUBSCRIBE: u16 = 0x0110;
     pub const UNSUBSCRIBE: u16 = 0x0111;
+    pub const PRESENCE_GOSSIP: u16 = 0x0201;
 }
 
 /// 노드↔노드 메시지.
@@ -44,19 +46,28 @@ pub enum NodeMessage {
         author: u64,
         content: String,
         nonce: Option<String>,
+        /// 답장 대상 메시지 id (없으면 일반 메시지, D39).
+        reference_message_id: Option<u64>,
     },
-    /// 소유 노드 → 구독자 보유 노드: 이벤트 팬아웃. `user_ids` = 그 노드의 로컬 대상 (D12/D24).
+    /// 소유 노드 → 구독자 보유 노드: 이벤트 팬아웃 (범용 envelope, D39).
+    /// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON, `user_ids`=그 노드의 로컬 대상 (D12/D24).
     RealmFanout {
         realm_id: u64,
-        channel_id: u64,
-        message_id: u64,
-        author: u64,
-        content: String,
-        nonce: Option<String>,
+        t: String,
+        payload: String,
         user_ids: Vec<u64>,
+    },
+    /// 비소유 노드 → 소유 노드: 비-메시지 이벤트 팬아웃 위임 (범용 envelope, D39).
+    RealmEmit {
+        realm_id: u64,
+        t: String,
+        payload: String,
     },
     Subscribe { realm_id: u64, user_id: u64, node_id: u64 },
     Unsubscribe { realm_id: u64, user_id: u64, node_id: u64 },
+    /// 전역 presence 델타 (Q11/D12). `node_id`=이 유저를 호스팅(또는 해제)한 노드, `status`=user_status u8.
+    /// 풀메시 브로드캐스트 → 각 노드가 자기 view 갱신 후 그 유저의 로컬 친구에게 PRESENCE_UPDATE 배달.
+    PresenceGossip { user_id: u64, node_id: u64, status: u8 },
 }
 
 impl NodeMessage {
@@ -68,8 +79,10 @@ impl NodeMessage {
             NodeMessage::Pong => msg_type::PONG,
             NodeMessage::RealmSend { .. } => msg_type::REALM_SEND,
             NodeMessage::RealmFanout { .. } => msg_type::REALM_FANOUT,
+            NodeMessage::RealmEmit { .. } => msg_type::REALM_EMIT,
             NodeMessage::Subscribe { .. } => msg_type::SUBSCRIBE,
             NodeMessage::Unsubscribe { .. } => msg_type::UNSUBSCRIBE,
+            NodeMessage::PresenceGossip { .. } => msg_type::PRESENCE_GOSSIP,
         }
     }
 
@@ -81,38 +94,44 @@ impl NodeMessage {
                 w.u64(*epoch);
             }
             NodeMessage::Ping | NodeMessage::Pong => {}
-            NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce } => {
+            NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce, reference_message_id } => {
                 w.u64(*realm_id);
                 w.u64(*channel_id);
                 w.u64(*author);
                 w.string(content);
                 encode_opt_string(w, nonce);
+                match reference_message_id {
+                    Some(r) => {
+                        w.bool(true);
+                        w.u64(*r);
+                    }
+                    None => w.bool(false),
+                }
             }
-            NodeMessage::RealmFanout {
-                realm_id,
-                channel_id,
-                message_id,
-                author,
-                content,
-                nonce,
-                user_ids,
-            } => {
+            NodeMessage::RealmFanout { realm_id, t, payload, user_ids } => {
                 w.u64(*realm_id);
-                w.u64(*channel_id);
-                w.u64(*message_id);
-                w.u64(*author);
-                w.string(content);
-                encode_opt_string(w, nonce);
+                w.string(t);
+                w.string(payload);
                 w.u32(user_ids.len() as u32);
                 for u in user_ids {
                     w.u64(*u);
                 }
+            }
+            NodeMessage::RealmEmit { realm_id, t, payload } => {
+                w.u64(*realm_id);
+                w.string(t);
+                w.string(payload);
             }
             NodeMessage::Subscribe { realm_id, user_id, node_id }
             | NodeMessage::Unsubscribe { realm_id, user_id, node_id } => {
                 w.u64(*realm_id);
                 w.u64(*user_id);
                 w.u64(*node_id);
+            }
+            NodeMessage::PresenceGossip { user_id, node_id, status } => {
+                w.u64(*user_id);
+                w.u64(*node_id);
+                w.u8(*status);
             }
         }
     }
@@ -129,29 +148,25 @@ impl NodeMessage {
                 let author = r.u64()?;
                 let content = r.string()?;
                 let nonce = decode_opt_string(r)?;
-                NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce }
+                let reference_message_id = if r.bool()? { Some(r.u64()?) } else { None };
+                NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce, reference_message_id }
             }
             msg_type::REALM_FANOUT => {
                 let realm_id = r.u64()?;
-                let channel_id = r.u64()?;
-                let message_id = r.u64()?;
-                let author = r.u64()?;
-                let content = r.string()?;
-                let nonce = decode_opt_string(r)?;
+                let t = r.string()?;
+                let payload = r.string()?;
                 let n = r.u32()? as usize;
                 let mut user_ids = Vec::with_capacity(n);
                 for _ in 0..n {
                     user_ids.push(r.u64()?);
                 }
-                NodeMessage::RealmFanout {
-                    realm_id,
-                    channel_id,
-                    message_id,
-                    author,
-                    content,
-                    nonce,
-                    user_ids,
-                }
+                NodeMessage::RealmFanout { realm_id, t, payload, user_ids }
+            }
+            msg_type::REALM_EMIT => {
+                let realm_id = r.u64()?;
+                let t = r.string()?;
+                let payload = r.string()?;
+                NodeMessage::RealmEmit { realm_id, t, payload }
             }
             msg_type::SUBSCRIBE => NodeMessage::Subscribe {
                 realm_id: r.u64()?,
@@ -162,6 +177,11 @@ impl NodeMessage {
                 realm_id: r.u64()?,
                 user_id: r.u64()?,
                 node_id: r.u64()?,
+            },
+            msg_type::PRESENCE_GOSSIP => NodeMessage::PresenceGossip {
+                user_id: r.u64()?,
+                node_id: r.u64()?,
+                status: r.u8()?,
             },
             other => return Err(DecodeError::UnknownTag(other)),
         })
@@ -211,6 +231,7 @@ mod tests {
             author: 0xA,
             content: "안녕 hi".into(),
             nonce: Some("n-1".into()),
+            reference_message_id: Some(0xBEEF),
         };
         let framed = msg.encode(3, 9);
         let (payload, _) = read_frame(&framed).unwrap().unwrap();
@@ -222,17 +243,37 @@ mod tests {
     fn realm_fanout_round_trip() {
         let msg = NodeMessage::RealmFanout {
             realm_id: 0x100,
-            channel_id: 0xC0,
-            message_id: 0xDEAD,
-            author: 0xA,
-            content: "msg".into(),
-            nonce: None,
+            t: "GUILD_MEMBER_ADD".into(),
+            payload: r#"{"realm_id":"256","user":{"id":"10"}}"#.into(),
             user_ids: vec![1, 2, 3, 99],
         };
         let framed = msg.encode(1, 0xABCD);
         let (payload, _) = read_frame(&framed).unwrap().unwrap();
         let (h, decoded) = NodeMessage::decode(payload).unwrap();
         assert_eq!(h.trace_id, 0xABCD);
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn realm_emit_round_trip() {
+        let msg = NodeMessage::RealmEmit {
+            realm_id: 0x100,
+            t: "GUILD_MEMBER_REMOVE".into(),
+            payload: r#"{"realm_id":"256","user":{"id":"10"}}"#.into(),
+        };
+        let framed = msg.encode(3, 0x55);
+        let (payload, _) = read_frame(&framed).unwrap().unwrap();
+        let (_, decoded) = NodeMessage::decode(payload).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn presence_gossip_round_trip() {
+        let msg = NodeMessage::PresenceGossip { user_id: 0xABCDEF, node_id: 7, status: 1 };
+        let framed = msg.encode(7, 0x1234);
+        let (payload, _) = read_frame(&framed).unwrap().unwrap();
+        let (h, decoded) = NodeMessage::decode(payload).unwrap();
+        assert_eq!(h.msg_type, msg_type::PRESENCE_GOSSIP);
         assert_eq!(decoded, msg);
     }
 

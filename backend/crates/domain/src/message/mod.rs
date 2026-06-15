@@ -13,6 +13,8 @@ pub struct Message {
     pub author_id: UserId,
     pub content: String,
     pub nonce: Option<String>,
+    /// 답장 대상 메시지 (없으면 일반 메시지).
+    pub reference_message_id: Option<MessageId>,
 }
 
 /// 신규 메시지 생성 입력.
@@ -24,4 +26,6 @@ pub struct NewMessage {
     pub author_id: UserId,
     pub content: String,
     pub nonce: Option<String>,
+    /// 답장 대상 (있으면 `reference_message_id`로 저장).
+    pub reference_message_id: Option<MessageId>,
 }

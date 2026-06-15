@@ -38,8 +38,44 @@ enum Command {
     CreateInvite(CreateInviteArgs),
     /// 초대 코드로 길드 합류.
     Join(JoinArgs),
+    /// 길드 멤버 목록 조회 (멤버 전용).
+    Members(MembersArgs),
+    /// 멤버 닉 수정 (본인=CHANGE_NICKNAME / 타인=MANAGE_NICKNAMES). --nick 생략 시 제거.
+    SetNick(SetNickArgs),
+    /// 멤버 추방 (KICK_MEMBERS 필요).
+    Kick(KickArgs),
+    /// 길드 탈퇴 (본인).
+    Leave(LeaveArgs),
+    /// 1:1 DM 열기 (find-or-create) → DM 채널 반환.
+    OpenDm(OpenDmArgs),
+    /// 그룹DM 생성 (호출자 = 소유자).
+    CreateGroupDm(CreateGroupDmArgs),
+    /// 그룹DM 참가자 추가 (소유자 전용).
+    AddRecipient(RecipientArgs),
+    /// 그룹DM 참가자 제거(소유자) 또는 본인 탈퇴.
+    RemoveRecipient(RecipientArgs),
+    /// 친구 요청/수락 (상대가 이미 요청했으면 수락).
+    AddFriend(RelationArgs),
+    /// 유저 차단.
+    BlockUser(RelationArgs),
+    /// 관계 제거 (친구 삭제/요청 취소·거절/차단 해제).
+    RemoveRelationship(RelationArgs),
+    /// 내 관계 목록 (친구/대기/차단).
+    Relationships(TokenArgs),
+    /// 채널을 메시지까지 읽음 처리 (ack) → MESSAGE_ACK.
+    Ack(AckArgs),
+    /// 내 읽음 상태 목록 (채널별 last_read + 안 읽은 멘션 수).
+    ReadStates(TokenArgs),
     /// 채널에 메시지 전송 (REST → gateway로 팬아웃).
     Send(SendArgs),
+    /// 메시지 편집 (작성자 본인) → MESSAGE_UPDATE.
+    Edit(EditArgs),
+    /// 메시지 삭제 (소프트, 작성자/MANAGE_MESSAGES) → MESSAGE_DELETE.
+    DeleteMessage(DeleteMessageArgs),
+    /// 메시지에 리액션 추가 (본인) → MESSAGE_REACTION_ADD.
+    React(ReactArgs),
+    /// 메시지 리액션 제거 (본인) → MESSAGE_REACTION_REMOVE.
+    Unreact(ReactArgs),
     /// Gateway(WS) 연결 → 이벤트 구독·출력.
     Listen(ListenArgs),
     /// 헤드리스 종단 시나리오 자동 검증 (D1).
@@ -145,6 +181,93 @@ struct JoinArgs {
     code: String,
 }
 #[derive(Args)]
+struct MembersArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+}
+#[derive(Args)]
+struct SetNickArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    user: String,
+    /// 새 닉. 생략 시 닉 제거.
+    #[arg(long)]
+    nick: Option<String>,
+}
+#[derive(Args)]
+struct KickArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    user: String,
+}
+#[derive(Args)]
+struct LeaveArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+}
+#[derive(Args)]
+struct OpenDmArgs {
+    #[arg(long)]
+    token: String,
+    /// 상대 user id.
+    #[arg(long)]
+    user: String,
+}
+#[derive(Args)]
+struct CreateGroupDmArgs {
+    #[arg(long)]
+    token: String,
+    /// 참가자 user id들 (콤마 구분, 호출자 제외).
+    #[arg(long, value_delimiter = ',')]
+    users: Vec<String>,
+    /// 그룹 이름 (선택).
+    #[arg(long)]
+    name: Option<String>,
+}
+#[derive(Args)]
+struct RecipientArgs {
+    #[arg(long)]
+    token: String,
+    /// 그룹DM 채널 id.
+    #[arg(long)]
+    channel: String,
+    /// 대상 user id.
+    #[arg(long)]
+    user: String,
+}
+#[derive(Args)]
+struct RelationArgs {
+    #[arg(long)]
+    token: String,
+    /// 상대 user id.
+    #[arg(long)]
+    user: String,
+}
+#[derive(Args)]
+struct TokenArgs {
+    #[arg(long)]
+    token: String,
+}
+#[derive(Args)]
+struct AckArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+}
+#[derive(Args)]
 struct SendArgs {
     #[arg(long)]
     token: String,
@@ -154,6 +277,41 @@ struct SendArgs {
     content: String,
     #[arg(long)]
     nonce: Option<String>,
+    /// 답장 대상 메시지 id (D39).
+    #[arg(long)]
+    reply: Option<String>,
+}
+#[derive(Args)]
+struct EditArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+    #[arg(long)]
+    content: String,
+}
+#[derive(Args)]
+struct DeleteMessageArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+}
+#[derive(Args)]
+struct ReactArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+    /// 유니코드 이모지 (예: 👍).
+    #[arg(long)]
+    emoji: String,
 }
 #[derive(Args)]
 struct ListenArgs {
@@ -221,9 +379,76 @@ async fn main() -> std::process::ExitCode {
                 println!("  channel  = {} ({})", c.id, c.name.clone().unwrap_or_default());
             }
         }),
-        Command::Send(a) => rest::send_message(&base, &a.token, &a.channel, &a.content, a.nonce.clone())
+        Command::Members(a) => rest::list_members(&base, &a.token, &a.guild).await.map(|ms| {
+            println!("✅ {} member(s)", ms.len());
+            for m in &ms {
+                let nick = m.nick.clone().unwrap_or_else(|| "-".into());
+                println!("  {} nick={} joined={} roles={:?}", m.user_id, nick, m.joined_at, m.roles);
+            }
+        }),
+        Command::SetNick(a) => rest::set_nick(&base, &a.token, &a.guild, &a.user, a.nick.as_deref())
+            .await
+            .map(|m| println!("✅ nick set: {} → {:?}", m.user_id, m.nick)),
+        Command::Kick(a) => rest::remove_member(&base, &a.token, &a.guild, &a.user)
+            .await
+            .map(|_| println!("✅ kicked {} from {}", a.user, a.guild)),
+        Command::Leave(a) => rest::remove_member(&base, &a.token, &a.guild, "@me")
+            .await
+            .map(|_| println!("✅ left guild {}", a.guild)),
+        Command::OpenDm(a) => rest::open_dm(&base, &a.token, &a.user).await.map(|d| {
+            println!("✅ DM channel {} (realm {}, {})", d.id, d.realm_id, d.kind);
+            println!("  recipients = {:?}", d.recipients);
+        }),
+        Command::CreateGroupDm(a) => rest::create_group_dm(&base, &a.token, a.users.clone(), a.name.clone()).await.map(|d| {
+            println!("✅ group DM {} (realm {})", d.id, d.realm_id);
+            println!("  recipients = {:?}", d.recipients);
+        }),
+        Command::AddRecipient(a) => rest::add_recipient(&base, &a.token, &a.channel, &a.user)
+            .await
+            .map(|_| println!("✅ added {} to group {}", a.user, a.channel)),
+        Command::RemoveRecipient(a) => rest::remove_recipient(&base, &a.token, &a.channel, &a.user)
+            .await
+            .map(|_| println!("✅ removed {} from group {}", a.user, a.channel)),
+        Command::AddFriend(a) => rest::put_relationship(&base, &a.token, &a.user, "friend")
+            .await
+            .map(|r| println!("✅ relationship with {} → {}", r.user_id, r.kind)),
+        Command::BlockUser(a) => rest::put_relationship(&base, &a.token, &a.user, "block")
+            .await
+            .map(|r| println!("✅ blocked {} ({})", r.user_id, r.kind)),
+        Command::RemoveRelationship(a) => rest::delete_relationship(&base, &a.token, &a.user)
+            .await
+            .map(|_| println!("✅ relationship with {} removed", a.user)),
+        Command::Relationships(a) => rest::list_relationships(&base, &a.token).await.map(|rs| {
+            println!("✅ {} relationship(s)", rs.len());
+            for r in &rs {
+                println!("  {} → {}", r.user_id, r.kind);
+            }
+        }),
+        Command::Ack(a) => rest::ack(&base, &a.token, &a.channel, &a.message).await.map(|s| {
+            println!("✅ acked channel {} → last_read={} mentions={}", s.channel_id, a.message, s.mention_count);
+        }),
+        Command::ReadStates(a) => rest::list_read_states(&base, &a.token).await.map(|ss| {
+            println!("✅ {} read state(s)", ss.len());
+            for s in &ss {
+                let lr = s.last_read_message_id.clone().unwrap_or_else(|| "-".into());
+                println!("  channel {} last_read={} mentions={}", s.channel_id, lr, s.mention_count);
+            }
+        }),
+        Command::Send(a) => rest::send_message(&base, &a.token, &a.channel, &a.content, a.nonce.clone(), a.reply.clone())
             .await
             .map(|_| println!("✅ queued (will arrive via gateway MESSAGE_CREATE)")),
+        Command::Edit(a) => rest::edit_message(&base, &a.token, &a.channel, &a.message, &a.content)
+            .await
+            .map(|m| println!("✅ edited {} → {}", m.id, m.content)),
+        Command::DeleteMessage(a) => rest::delete_message(&base, &a.token, &a.channel, &a.message)
+            .await
+            .map(|_| println!("✅ deleted message {}", a.message)),
+        Command::React(a) => rest::add_reaction(&base, &a.token, &a.channel, &a.message, &a.emoji)
+            .await
+            .map(|_| println!("✅ reacted {} to {}", a.emoji, a.message)),
+        Command::Unreact(a) => rest::remove_reaction(&base, &a.token, &a.channel, &a.message, &a.emoji)
+            .await
+            .map(|_| println!("✅ unreacted {} from {}", a.emoji, a.message)),
         Command::Listen(a) => gateway_client::listen(&base, &a.token, a.seconds).await,
         Command::Scenario(a) => return scenario::run(&base, &a.password).await,
     };

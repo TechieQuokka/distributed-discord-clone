@@ -48,7 +48,7 @@ async fn run_inner(base: &str, password: &str) -> Result<(), String> {
     // 4) REST로 메시지 전송 (nonce로 멱등/대조).
     let nonce = format!("nonce-{}", now_ms());
     let content = "hello from scenario";
-    rest::send_message(base, &auth.access_token, &channel.id, content, Some(nonce.clone())).await?;
+    rest::send_message(base, &auth.access_token, &channel.id, content, Some(nonce.clone()), None).await?;
     println!("4. sent message (nonce={nonce})");
 
     // 5) gateway에서 MESSAGE_CREATE 수신 검증 (5초 타임아웃).

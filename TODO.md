@@ -1,7 +1,7 @@
 # TODO
 
 > 분산 Discord 클론 — 작업 추적. 설계 출처: [docs/architecture/decisions.md](docs/architecture/decisions.md).
-> 현재 단계: **DB 설계 + 문서화** (코딩 전). 로드맵 = D §4-R.
+> 현재 단계: **Phase 3 (Discord 본체) 완료** (v1.28.0) → Phase 4 진입 예정. 로드맵 = D §4-R. 이어서 → RESUME.md.
 
 범례: `[ ]` 미착수 · `[~]` 진행중 · `[x]` 완료
 
@@ -13,7 +13,7 @@
 
 ## 📄 문서화 (Docs) — 진행중
 
-- [x] 아키텍처 결정 원장 (decisions.md, D1~D38)
+- [x] 아키텍처 결정 원장 (decisions.md, D1~D39)
 - [x] DB 설계 문서군 (overview / schema / erd / partitioning)
 - [x] 설계 토론 기록 (design-discussion.md)
 - [x] 문서 인덱스 (docs/README.md)
@@ -72,13 +72,13 @@
 
 - [x] 역할/권한 비트마스크 + 계산순서 (D17)  # roles/member_roles(V5)+@everyone 기본, RoleRepository, REST 역할관리, 강제(SEND_MESSAGES/MANAGE_CHANNELS/CREATE_INVITE/MANAGE_ROLES) 2유저 라이브
 - [x] 채널 권한 오버라이드  # channel_overwrites(V6)+ChannelOverwriteRepository, effective_channel_permissions 배선, REST PUT /channels/:id/permissions/:tid, gateway can_send 채널컨텍스트화. 2유저 라이브(deny@everyone→member allow)
-- [ ] DM / 그룹DM (Realm + dm_pairs, DB-D2)
-- [ ] 멤버 관리 (nick/joined/roles)
+- [x] DM / 그룹DM (Realm + dm_pairs, DB-D2)  # domain dm 모듈+DmRepository / storage(V9 dm_pairs, 1:1 find-or-create+그룹) / rest(POST /users/@me/channels, recipients 관리) / cli. 메시징·권한·팬아웃은 길드 경로 무변경 재사용(P4). 1:1+그룹 라이브 검증
+- [x] 멤버 관리 (nick/joined/roles)  # routes/member(GET 목록·단건/PATCH nick/DELETE 추방·탈퇴, @me) + GuildRepository 4메서드 + GUILD_MEMBER_ADD/_UPDATE/_REMOVE 범용 팬아웃(D39)
 - [x] 초대 (invites)  # domain Invite/port + storage(트랜잭션 redeem)+V4 마이그레이션 + REST(생성/redeem) + CLI(create-invite/join). 2유저 라이브 검증(초대→합류→자동구독→크로스유저 팬아웃)
-- [ ] 리액션 / 편집·삭제(소프트) / 멘션 / 답장
-- [ ] 친구·차단 (relationships)
-- [ ] 읽음 상태 / 미읽음 카운트 (read_states)
-- [ ] 전역 presence (gossip, Q2 후속/Q11)
+- [x] 리액션 / 편집·삭제(소프트) / 멘션 / 답장  # 리액션·편집·소프트삭제(D39 envelope, V7) + 답장(reference_message_id 관통) + 멘션(parse_mentions, V8 message_mentions). 역할 멘션/리액션 집계는 Phase 4
+- [x] 친구·차단 (relationships)  # domain relationship+RelationshipRepository / storage(V10, 전이 트랜잭션) / rest(GET/PUT/DELETE /users/@me/relationships) / 유저단위 UserEmitter(Hub) 실시간 RELATIONSHIP_*. 차단→1:1 DM 열기·전송 거부(§5 seam 닫힘, D40). 라이브 검증. 크로스노드 유저 라우팅은 Q11 seam
+- [x] 읽음 상태 / 미읽음 카운트 (read_states)  # domain read_state+ReadStateRepository / storage(V11, ack 재계산·bump upsert) / rest(POST .../ack, GET /users/@me/read-states) / gateway(dispatch bump + READY read_states) / cli. MESSAGE_ACK via UserEmitter(D41). 라이브 검증
+- [x] 전역 presence (gossip, Q2 후속/Q11)  # node presence 레지스트리(휘발) + PRESENCE_GOSSIP(0x0201) 풀메시 broadcast + 로컬 친구 필터(relationships 재사용) → PRESENCE_UPDATE / READY presences. 단일+2노드 mTLS 라이브 검증. D40/D41 크로스노드 seam 닫힘(D42). gossip discovery(SWIM 동적 join)는 Phase 5
 
 ---
 

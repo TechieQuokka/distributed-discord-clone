@@ -23,8 +23,13 @@ pub enum RealmCommand {
         author: UserId,
         content: String,
         nonce: Option<String>,
+        /// 답장 대상 메시지 id (없으면 일반, D39).
+        reference_message_id: Option<MessageId>,
         reply: oneshot::Sender<MessageId>,
     },
+    /// 비-메시지 이벤트 팬아웃 (범용 envelope, D39). persist 없이 구독자표로 방출.
+    /// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON(불투명).
+    Broadcast { t: String, payload: String },
 }
 
 /// Realm이 방출하는 이벤트(팬아웃 대상 포함).
@@ -38,6 +43,16 @@ pub enum RealmEvent {
         content: String,
         /// 클라 멱등성 키 — 작성자 세션이 낙관적 전송과 대조 (D34).
         nonce: Option<String>,
+        /// 답장 대상 메시지 id (D39).
+        reference_message_id: Option<MessageId>,
+        /// 팬아웃 대상 (user, node) — 구독자표 스냅샷 (D12).
+        targets: Vec<(UserId, u64)>,
+    },
+    /// 비-메시지 이벤트 (범용 envelope, D39). dispatch 드라이버가 persist 없이 바로 팬아웃.
+    Broadcast {
+        realm: RealmId,
+        t: String,
+        payload: String,
         /// 팬아웃 대상 (user, node) — 구독자표 스냅샷 (D12).
         targets: Vec<(UserId, u64)>,
     },
@@ -89,7 +104,7 @@ impl Actor for RealmActor {
             RealmCommand::Unsubscribe { user } => {
                 self.subscribers.remove(&user.0.raw());
             }
-            RealmCommand::SendMessage { channel_id, author, content, nonce, reply } => {
+            RealmCommand::SendMessage { channel_id, author, content, nonce, reference_message_id, reply } => {
                 // 액터가 단일 소유자로서 ID·순서를 확정(D24). persist는 events 소비측(드라이버)이
                 // 팬아웃 전에 수행(persist-then-fanout) — node 코어는 IO 무의존 유지(P2).
                 let id = MessageId(self.snowflakes.next(self.clock.now_ms()));
@@ -100,10 +115,21 @@ impl Actor for RealmActor {
                     author,
                     content,
                     nonce,
+                    reference_message_id,
                     targets: self.target_snapshot(),
                 };
                 let _ = self.events.send(event).await;
                 let _ = reply.send(id);
+            }
+            RealmCommand::Broadcast { t, payload } => {
+                // 비-메시지 이벤트: persist 없이 현재 구독자 스냅샷으로 방출 (D39).
+                let event = RealmEvent::Broadcast {
+                    realm: self.realm_id,
+                    t,
+                    payload,
+                    targets: self.target_snapshot(),
+                };
+                let _ = self.events.send(event).await;
             }
         }
     }
@@ -141,6 +167,7 @@ mod tests {
             author: uid(0xA),
             content: "hi".into(),
             nonce: None,
+            reference_message_id: None,
             reply: r1,
         })
         .await
@@ -153,6 +180,7 @@ mod tests {
             author: uid(0xA),
             content: "yo".into(),
             nonce: None,
+            reference_message_id: None,
             reply: r2,
         })
         .await
@@ -161,7 +189,9 @@ mod tests {
 
         assert!(mid2.0 > mid1.0, "single-owner actor must produce monotonic ids");
 
-        let RealmEvent::MessageCreated { content, targets, .. } = erx.recv().await.unwrap();
+        let RealmEvent::MessageCreated { content, targets, .. } = erx.recv().await.unwrap() else {
+            panic!("expected MessageCreated");
+        };
         assert_eq!(content, "hi");
         assert_eq!(targets.len(), 2); // 구독자 2명 모두 팬아웃 대상
     }
@@ -182,14 +212,42 @@ mod tests {
             author: uid(1),
             content: "x".into(),
             nonce: None,
+            reference_message_id: None,
             reply: r,
         })
         .await
         .unwrap();
         rx.await.unwrap();
 
-        let RealmEvent::MessageCreated { targets, .. } = erx.recv().await.unwrap();
+        let RealmEvent::MessageCreated { targets, .. } = erx.recv().await.unwrap() else {
+            panic!("expected MessageCreated");
+        };
         assert_eq!(targets.len(), 0);
+    }
+
+    /// Broadcast(D39): 비-메시지 이벤트가 현재 구독자 스냅샷으로 방출된다(persist 무관).
+    #[tokio::test]
+    async fn broadcast_emits_with_subscriber_snapshot() {
+        let (etx, mut erx) = mpsc::channel(16);
+        let addr = spawn(
+            RealmActor::new(realm(7), mkgen(1), Arc::new(ManualClock::new(EPOCH_MS + 1)), etx),
+            16,
+        );
+        addr.send(RealmCommand::Subscribe { user: uid(0xA), node: 1 }).await.unwrap();
+        addr.send(RealmCommand::Subscribe { user: uid(0xB), node: 2 }).await.unwrap();
+        addr.send(RealmCommand::Broadcast {
+            t: "GUILD_MEMBER_ADD".into(),
+            payload: r#"{"x":1}"#.into(),
+        })
+        .await
+        .unwrap();
+
+        let RealmEvent::Broadcast { t, payload, targets, .. } = erx.recv().await.unwrap() else {
+            panic!("expected Broadcast");
+        };
+        assert_eq!(t, "GUILD_MEMBER_ADD");
+        assert_eq!(payload, r#"{"x":1}"#);
+        assert_eq!(targets.len(), 2);
     }
 
     /// 회귀(D11): 같은 노드의 두 Realm이 **공유 generator**를 쓰면 같은 ms에도 ID가 유일.
@@ -219,6 +277,7 @@ mod tests {
             author: uid(1),
                     content: "x".into(),
                     nonce: None,
+                    reference_message_id: None,
                     reply: tx,
                 })
                 .await

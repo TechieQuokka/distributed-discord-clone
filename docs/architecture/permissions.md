@@ -103,5 +103,6 @@ fn compute_permissions(member, guild, channel) -> u64:
 - DM/그룹DM Realm: 길드 권한 개념 약함 → 참가자 여부 + 기본 규칙으로 단순화.
 
 ## 5. DM/그룹DM에서의 권한
-- 1:1 DM: 두 참가자 동등. 차단(relationship=blocked) 시 전송 거부.
-- 그룹DM: 소유자(`realms.owner_id`)만 멤버 추가/제거. 그 외 동등.
+- 1:1 DM: 두 참가자 동등. **차단(relationship=blocked) 시 전송 거부 — 구현됨(D40, Phase 3)**: 어느 한쪽이라도 차단하면 1:1 DM **열기**(rest-api `open_channel`)와 **전송**(gateway `can_send`)에서 `is_blocked_between`으로 거부(403).
+- 그룹DM: 소유자(`realms.owner_id`)만 멤버 추가/제거. 그 외 동등. (그룹DM엔 차단 게이팅 미적용 — Discord 동일.)
+- DM Realm은 @everyone 역할이 없어 권한 계산이 `default_everyone`으로 폴백 → 멤버면 VIEW/SEND/HISTORY 통과(길드와 동일 경로, D8/P4).

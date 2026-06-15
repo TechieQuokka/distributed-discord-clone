@@ -37,7 +37,7 @@
 X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 ```
 
-### 구현 현황 (Phase 1–3, v1.21.x)
+### 구현 현황 (Phase 1–3, v1.24.x)
 
 > 아래 §1~ 표는 **전체 카피 대상 청사진**이다. **현재 실제 구현된 엔드포인트**는 다음과 같다(나머지는 후속 Phase).
 
@@ -47,12 +47,27 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | POST | `/guilds` | — | 길드 + @everyone 역할 + 기본 general 채널 |
 | POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | |
 | GET / POST | `/guilds/{id}/roles` | GET=멤버 / POST=MANAGE_ROLES (권한상승 방지) | |
+| GET | `/guilds/{id}/members` | 멤버 | 멤버 목록(nick/joined/역할) |
+| GET | `/guilds/{id}/members/{user_id}` | 멤버 | 멤버 단건 조회 |
+| PATCH | `/guilds/{id}/members/{user_id}` | 본인=CHANGE_NICKNAME / 타인=MANAGE_NICKNAMES | nick 수정 → `GUILD_MEMBER_UPDATE` 팬아웃 (D39) |
+| DELETE | `/guilds/{id}/members/{user_id}` | 타인=KICK_MEMBERS / 본인=leave | 추방/탈퇴 → `GUILD_MEMBER_REMOVE` 팬아웃 (D39) |
 | PUT | `/guilds/{id}/members/{user_id}/roles/{role_id}` | MANAGE_ROLES | 역할 부여 |
 | POST | `/guilds/{id}/invites` | CREATE_INVITE | **길드 레벨**(청사진의 채널 레벨 §4와 다름 — 단순화 채택) |
-| POST | `/invites/{code}` | (멤버 아님 무관) | redeem → members 추가 |
+| POST | `/invites/{code}` | (멤버 아님 무관) | redeem → members 추가 → `GUILD_MEMBER_ADD` 팬아웃 (D39) |
+| POST | `/users/@me/channels` | (인증) | DM 열기 — `recipient_id`=1:1(`dm_pairs` find-or-create, 기존 있으면 200 재사용)·`recipient_ids`=그룹DM 생성 (D8/DB-D2) |
+| PUT | `/channels/{id}/recipients/{user_id}` | 그룹 소유자 | 그룹DM 참가자 추가 → `CHANNEL_RECIPIENT_ADD` 팬아웃 |
+| DELETE | `/channels/{id}/recipients/{user_id}` | 소유자(타인) / 본인(탈퇴) | 그룹DM 참가자 제거 → `CHANNEL_RECIPIENT_REMOVE` (소유자 탈퇴 불가) |
+| GET | `/users/@me/relationships` | (인증) | 내 친구/대기/차단 목록 (D40) |
+| PUT | `/users/@me/relationships/{user_id}` | (인증) | `type:friend`=요청/수락(상대 차단 시 403) · `type:block`=차단 → `RELATIONSHIP_ADD`(유저 emit) |
+| DELETE | `/users/@me/relationships/{user_id}` | (인증) | 친구 삭제/요청 취소·거절/차단 해제 → `RELATIONSHIP_REMOVE` |
+| POST | `/channels/{id}/messages/{mid}/ack` | VIEW_CHANNEL | 채널을 그 메시지까지 읽음 처리(+멘션수 재계산) → `MESSAGE_ACK`(유저 emit) (D41) |
+| GET | `/users/@me/read-states` | (인증) | 내 읽음 상태 목록(채널별 last_read + mention_count). READY 스냅샷과 동일 |
 | PUT | `/channels/{id}/permissions/{target_id}` | MANAGE_ROLES | 오버라이드 upsert (DELETE는 후속) |
 | GET | `/channels/{id}/messages` | VIEW_CHANNEL + READ_MESSAGE_HISTORY | 히스토리 커서 (D38) |
-| POST | `/channels/{id}/messages` | SEND_MESSAGES | **`gateway` crate가 서빙**(D31) — 채널 컨텍스트 권한 계산 후 persist-then-fanout (D24) |
+| POST | `/channels/{id}/messages` | SEND_MESSAGES | **`gateway` crate가 서빙**(D31) — 채널 컨텍스트 권한 계산 후 persist-then-fanout (D24). `reference_message_id`(답장, 같은 채널 검증)·`<@id>` 멘션 파싱 지원 (D39, V8 `message_mentions`) |
+| PATCH | `/channels/{id}/messages/{mid}` | 작성자 본인 | 편집 → `edited_at` 갱신 + `MESSAGE_UPDATE` 팬아웃 (D39) |
+| DELETE | `/channels/{id}/messages/{mid}` | 작성자 본인 또는 MANAGE_MESSAGES | 소프트 삭제(`deleted_at`) + `MESSAGE_DELETE` 팬아웃 (D39) |
+| PUT/DELETE | `/channels/{id}/messages/{mid}/reactions/{emoji}/@me` | ADD_REACTIONS(추가) / 멤버(제거) | 본인 리액션 추가·제거 → `MESSAGE_REACTION_ADD/_REMOVE` 팬아웃 (D39, V7 `reactions`) |
 
 > 권한 계산은 채널 오버라이드까지 적용(D17): `@everyone` → 역할 OR → 채널 오버라이드(@everyone/역할/멤버) → owner/Administrator 단축. 미구현 항목(밴/이모지/스레드/감사로그/리액션/편집·삭제 등)은 TODO Phase 3~4.
 

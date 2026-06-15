@@ -89,6 +89,7 @@
   - 그룹 DM = Realm (자체 id)
 - 모든 Realm은 액터 1개. 소유 노드 = `hash(realm_id)`.
 - → DM 특수 케이스가 사라짐. 라우팅은 "Realm에게 보내기" 하나로 통일.
+- **구현(Phase 3, DM/그룹DM)**: 통일 추상의 배당이 실제로 발현 — DM·그룹DM도 `realms`+`channels`(+`members`)라 **메시징·권한·분산 팬아웃·자동구독(D13)을 길드와 무변경 공유**(gateway/node/protocol/server 코드 추가 0). DM Realm은 @everyone 역할이 없어 권한 계산이 `default_everyone`으로 폴백 → 멤버면 전송·조회가 길드와 같은 경로로 통과(perm `effective`/`can_send`의 기존 폴백). 1:1 DM 중복 방지는 `dm_pairs`(DB-D2) find-or-create(같은 두 사람 = 같은 채널). 그룹DM은 자체 realm(kind=group_dm, owner_id) + 참가자 관리(`PUT`/`DELETE /channels/:id/recipients/:uid`, 소유자만 추가·타인제거 / 본인 탈퇴, 소유자 탈퇴 불가). 멤버 추가/제거는 `GuildRepository::{add_member,remove_member}` 재사용. 신규 포트 `DmRepository`(find_dm/create_dm/create_group_dm/get_realm), wire **V9 `dm_pairs`**. 실시간 통지는 `CHANNEL_RECIPIENT_ADD/_REMOVE`(D39 envelope·RealmEmitter 재사용). 1:1 차단(blocked) 거부는 relationships 도입 후 seam(permissions.md §5).
 
 ### D9. 2단 소유권 (Two-tier Ownership)
 - **세션 소유**: WS 연결을 들고 있는 노드 = 클라이언트가 *접속한* 노드.
@@ -278,6 +279,42 @@
 
 ### D38. 페이지네이션 = Snowflake 커서
 - 메시지 히스토리 = `before`/`after`/`around` + Snowflake 커서.
+
+### D39. Realm 이벤트 팬아웃 = 범용 envelope (메시지 특수화 흡수)
+- **문제**: Phase 1~2의 팬아웃 경로(`RealmEvent`/`Router::fanout`/`LocalDelivery`/wire `REALM_FANOUT`)가 전부 `MESSAGE_CREATE` 모양으로 하드코딩돼 있었다. 멤버 변동(`GUILD_MEMBER_ADD/_UPDATE/_REMOVE`) 같은 **비-메시지 실시간 이벤트**를 같은 구독자표(D12)로 흘려보낼 수 없었다.
+- **결정 (P4 특수케이스는 추상화로 흡수)**: 팬아웃을 **범용 envelope `(t, payload)`**로 일반화한다. `t`=이벤트 이름(`"MESSAGE_CREATE"`, `"GUILD_MEMBER_ADD"` …), `payload`=**클라에 그대로 나갈 JSON을 미리 직렬화한 불투명 문자열**. 메시지는 이 envelope의 한 경우가 된다.
+  - **JSON 단일 출처 = 생산 엣지**: payload JSON은 그 이벤트를 만든 엣지(메시지는 dispatch 드라이버, 멤버는 rest-api 핸들러)가 **한 번** 조립한다. 그 아래 계층(domain 포트·node·protocol wire)은 payload를 **파싱하지 않고 통과**시킨다 → node/protocol은 serde 무의존 유지(P2). 최종 배달 직전 gateway가 문자열→`Value`로 1회 역파싱해 세션에 push.
+- **persist 분기**: persist-then-fanout(D24)에서 **persist는 메시지에만** 적용. 멤버 이벤트는 진실이 이미 `members` 테이블(REST 트랜잭션)에 있으므로 **비-persist 팬아웃**. dispatch 드라이버가 이벤트 종류로 분기.
+- **emit 포트 (P2)**: REST(rest-api)는 Router를 직접 모른다 → domain에 **`RealmEmitter` 포트**(repo 포트와 같은 자리)를 두고 `Router`가 구현(`route_emit`: 로컬 소유면 액터로, 원격이면 wire `REALM_EMIT`로 위임 — `route_send`와 대칭). server가 `Arc<dyn RealmEmitter>`를 rest-api `AppState`에 주입.
+- **wire(node-wire.md §5 갱신)**: `REALM_FANOUT`(0x0103) 바디를 `realm_id, t:String, payload:String, user_ids:Vec<u64>`로 일반화(메시지 전용 필드 제거 — 모두 payload 안으로). 비소유 노드→소유 노드 emit 위임용 `REALM_EMIT`(0x0104) 신설(`realm_id, t:String, payload:String`). 기존 평탄 서브셋(D24 노트)을 이 범용형으로 대체.
+- **멤버 관리(Phase 3)**: `GuildRepository`에 `get_member/list_members/update_member_nick/remove_member` 추가. REST `GET/PATCH/DELETE /guilds/:id/members[/:uid]`(조회=멤버, nick=본인 CHANGE_NICKNAME 또는 타인 MANAGE_NICKNAMES, 추방=KICK_MEMBERS, leave=본인). 변동 시 위 emit으로 `GUILD_MEMBER_*` 팬아웃. 신규 합류자는 아직 미구독이라 **기존 접속 멤버**에게 통지되고, 본인은 redeem 응답/다음 READY로 상태 확보(D13).
+- **메시지 편집·삭제·리액션(Phase 3, 1.23)**: 같은 envelope로 `MESSAGE_UPDATE`/`MESSAGE_DELETE`/`MESSAGE_REACTION_ADD`/`_REMOVE`를 팬아웃(비-persist — 진실은 REST 트랜잭션이 DB에 기록). `MessageRepository`에 `get_message/edit_message/soft_delete_message`, 신규 `ReactionRepository`(add/remove). 편집=작성자 본인, 삭제=작성자 또는 `MANAGE_MESSAGES`, 리액션 추가=`ADD_REACTIONS`(채널 컨텍스트)·제거=본인. 소프트 삭제는 `messages.deleted_at`(히스토리 쿼리가 `deleted_at IS NULL` 필터). 리액션 저장 = **V7 `reactions`**(유니코드 emoji 1컬럼 PK — 02-schema 단순화 노트, 커스텀 이모지는 Phase 4).
+- **답장·멘션(Phase 3, 1.24)**: 둘은 메시지 **생성(MESSAGE_CREATE)** 경로에 얹는다(D39 broadcast가 아니라 기존 persist-then-fanout, D24).
+  - **답장**: `messages.reference_message_id`(구조적 입력)를 송신 경로 전체에 관통 — gateway `POST /channels/:id/messages` 바디 → `Router::route_send` → `RealmCommand::SendMessage` → `RealmEvent::MessageCreated` → wire `REALM_SEND`(크로스노드) → `NewMessage` persist → `MESSAGE_CREATE` payload. 참조 대상은 같은 채널의 살아있는 메시지여야(gateway에서 검증, 아니면 400).
+  - **멘션**: content에서 **파생**되므로 파이프라인을 안 건드린다 — dispatch 드라이버가 persist 후 `domain::mention::parse_mentions`(`<@id>`/`<@!id>`)로 뽑아 **V8 `message_mentions`**(유저만, FK 존재하는 유저로 한정)에 적재하고 `MESSAGE_CREATE` payload에 `mentions:[id]` 포함. 역할 멘션·"나를 멘션한 메시지" 조회는 Phase 4.
+
+### D40. 친구·차단(relationships) + 유저 단위 이벤트 emit
+- **데이터 (Phase 3 구현)**: Discord식 **방향성 행** `relationships(user_id, target_id, kind)` (02-schema §6, wire V10). A↔B 친구 = 양쪽 행 2개. kind = `friend`/`pending_in`/`pending_out`/`blocked`. 친구 요청 = 내 행 `pending_out`/상대 `pending_in` → 수락 시 양쪽 `friend`. 차단 = 내 행 `blocked` + 상대 행 제거. 상태 전이의 원자성(두 행)은 storage 트랜잭션(`RelationshipRepository`).
+- **차단 강제 (permissions.md §5 seam 닫힘)**: 어느 한쪽이라도 차단 시 **1:1 DM 열기·전송 거부**(rest-api `open_channel` + gateway `can_send`의 1:1 DM 분기에서 `is_blocked_between` 검사). 그룹DM엔 미적용(Discord 동일).
+- **유저 단위 이벤트 emit (`UserEmitter`) — D12의 "팬아웃 ↔ 전역 presence 분리"의 실체**: 친구·차단(`RELATIONSHIP_ADD/_REMOVE`)은 Realm 무관 전역 유저 이벤트라 구독자표(D12) 기반 `RealmEmitter`(D39)로 보낼 수 없다 → 별도 **`UserEmitter` 포트**(domain `emit`)를 둔다. 구현(adapter) = gateway `Hub`(대상 유저의 **이 노드 로컬 세션**에 배달), server가 rest-api `AppState`에 주입(`RealmEmitter`와 대칭).
+  - ⚠ **seam**: 대상 유저가 **다른 노드**에 접속 중이면 현재 미배달(로컬 한정). 크로스노드 유저 라우팅 = 전역 presence/gossip(Q11) 도입 후. Realm 이벤트는 구독자표로 크로스노드가 되지만 유저-전역 라우팅은 아직 없다(단일노드/동일노드에선 정상).
+
+### D41. 읽음 상태(read_states) + 미읽음 멘션 카운트
+- **데이터 (Phase 3 구현)**: `read_states(user_id, channel_id, last_read_message_id, mention_count)` (02-schema §8, wire V11). 채널별 "어디까지 읽었나" + 안 읽은 멘션 수. `last_read_message_id`는 FK 없음(messages는 Phase 4 파티셔닝 대상 — attachments/reactions와 동일 방침).
+- **mention_count 유지 전략 (자문자답)**: 매 조회 시 전체 카운트 = 비쌈. 매 메시지마다 갱신 = 핫패스 비용. → **증분 유지 + ack 시 재계산** 하이브리드:
+  - 멘션 발생 시(dispatch가 `message_mentions` 적재 직후) 대상들의 `mention_count` **+1**(`bump_mentions`, 작성자 제외, 존재 유저만 upsert). 새 메시지는 항상 최신 → 단순 증가가 정확.
+  - **ack**(`POST /channels/:cid/messages/:mid/ack`) 시 `last_read`=mid + `mention_count`를 **그 이후(`m.id > last_read`) 살아있는 멘션 수로 재계산**(한 문장 upsert). 증분 누적 오차를 ack가 정정.
+- **실시간 `MESSAGE_ACK`**: 한 유저의 여러 기기 동기화용 → Realm 무관 유저 이벤트라 **`UserEmitter`(D40) 재사용**(본인 세션들에 배달). READY 스냅샷에 `read_states` 포함(자동구독 D13 시점에 상태 확보). 크로스노드 유저 라우팅 seam은 D40과 동일(Q11).
+
+### D42. 전역 presence = gossip broadcast + 로컬 친구 필터 (Q11/D12 해소)
+- **문제 (D12 §"팬아웃 ↔ 전역 presence 분리"의 미정 갈래, Q11)**: 친구 온라인 여부는 Realm 무관 전역 유저 상태 → 구독자표(D12) 팬아웃으로 못 보낸다. D40/D41의 `UserEmitter`도 **로컬 노드 세션에만** 배달돼 크로스노드 미배달 seam이 있었다.
+- **결정 (Phase 3 구현)**: presence를 **풀메시 gossip broadcast(D4) + 각 노드의 로컬 친구 필터**로 전파한다.
+  - **휘발 상태(DB-D5)**: `node::presence::Presence` 인메모리 레지스트리. `user → (status, 호스팅 노드 집합)` — 집합이 비면 offline("any node hosts ⇒ online", 멀티노드 정확). 현재 online/offline(idle/dnd는 op 3 후속).
+  - **전이 기준 = live 세션**: 유저의 첫 live(소켓 연결) 세션에서 online, 마지막 live 세션 종료에서 offline(`Hub::live_count`). detach(버퍼만 남음)는 offline로 안 침 → RESUME 유예와 일관.
+  - **전파**: 전이 시 `PRESENCE_GOSSIP{user, node, status}`(wire 0x0201)을 **모든 피어에 broadcast**(`Router::broadcast`). 각 노드는 자기 view 갱신 후, 그 유저의 친구(relationships, D40) 중 **로컬 세션 보유자**에게 `PRESENCE_UPDATE` 배달(`Hub::deliver`가 로컬 없는 유저 자동 스킵). 수신 노드는 **재브로드캐스트 안 함**(원본이 풀메시로 이미 전 피어에 전송 → 루프·증폭 방지). READY 스냅샷에 친구 presence 포함.
+  - **친구 산출 = relationships 재사용**: 새 repo/포트 없이 `list_relationships(user) filter friend`로 대상 산출 → domain/storage/rest-api 무변경(친구 그래프가 presence 라우팅 키).
+- **이것이 닫는 것**: D40(RELATIONSHIP_*)·D41(MESSAGE_ACK)의 크로스노드 유저 라우팅도 같은 gossip 메커니즘으로 일반화 가능(현재는 presence만 broadcast; 후속에 다른 유저 이벤트도 동일 경로로).
+- **남은 seam**: 신규 노드 join 시 과거 presence 동기화(anti-entropy/SWIM) 없음(델타 only, Phase 5 gossip discovery와 함께) · idle/dnd 클라 op(3) · 전 노드 동시 재시작 시 presence 리셋(휘발).
 
 ---
 

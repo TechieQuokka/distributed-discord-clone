@@ -1,22 +1,40 @@
-//! 메시지 히스토리 라우트 (개념: routes/message). `GET /channels/:id/messages` (D38).
+//! 메시지 라우트 (개념: routes/message). 히스토리(D38) + 편집/삭제/리액션(D39).
 //!
-//! 메시지 **전송**은 실시간 경로(Gateway WS)로 처리. 여기선 히스토리 조회만.
+//! 메시지 **전송**은 실시간 경로(Gateway WS)로 처리. 여기선 히스토리 조회 + 사후 변경
+//! (편집/소프트삭제/리액션)을 다룬다. 변경은 `RealmEmitter`로 `MESSAGE_*` 팬아웃(D39).
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::routing::{get, put};
 use domain::id::{ChannelId, MessageId, Snowflake};
+use domain::permissions::Permissions;
 use domain::repo::Store;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+use crate::events::{message_delete_payload, message_update_payload, reaction_payload};
 use crate::extract::AuthUser;
 use crate::state::AppState;
 
 pub fn routes<S: Store + 'static>() -> axum::Router<AppState<S>> {
-    axum::Router::new().route(
-        "/channels/{channel_id}/messages",
-        axum::routing::get(list_messages::<S>),
-    )
+    axum::Router::new()
+        .route("/channels/{channel_id}/messages", get(list_messages::<S>))
+        .route(
+            "/channels/{channel_id}/messages/{message_id}",
+            axum::routing::patch(edit_message::<S>).delete(delete_message::<S>),
+        )
+        .route(
+            "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me",
+            put(add_reaction::<S>).delete(remove_reaction::<S>),
+        )
+}
+
+fn parse_channel(s: &str) -> Result<ChannelId, ApiError> {
+    s.parse::<u64>().map(|n| ChannelId(Snowflake::from_raw(n))).map_err(|_| ApiError::BadRequest("invalid channel id".into()))
+}
+fn parse_message(s: &str) -> Result<MessageId, ApiError> {
+    s.parse::<u64>().map(|n| MessageId(Snowflake::from_raw(n))).map_err(|_| ApiError::BadRequest("invalid message id".into()))
 }
 
 #[derive(Deserialize)]
@@ -77,4 +95,133 @@ async fn list_messages<S: Store + 'static>(
             })
             .collect(),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct EditReq {
+    pub content: String,
+}
+
+/// 메시지 편집 (작성자 본인) → `MESSAGE_UPDATE` 팬아웃.
+async fn edit_message<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path((channel_id, message_id)): Path<(String, String)>,
+    Json(req): Json<EditReq>,
+) -> Result<Json<MessageView>, ApiError> {
+    let cid = parse_channel(&channel_id)?;
+    let mid = parse_message(&message_id)?;
+    let content = req.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::BadRequest("empty content".into()));
+    }
+
+    let msg = st.store.get_message(mid).await?.ok_or(ApiError::NotFound)?;
+    if msg.channel_id != cid {
+        return Err(ApiError::NotFound);
+    }
+    if msg.author_id != user {
+        return Err(ApiError::Forbidden); // 작성자만 편집.
+    }
+    if !st.store.edit_message(mid, user, content).await? {
+        return Err(ApiError::NotFound); // 경합(이미 삭제 등).
+    }
+
+    let payload = message_update_payload(&msg, content);
+    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_UPDATE".into(), payload).await;
+    Ok(Json(MessageView {
+        id: mid.0.raw().to_string(),
+        channel_id: cid.0.raw().to_string(),
+        author_id: user.0.raw().to_string(),
+        content: content.to_owned(),
+    }))
+}
+
+/// 메시지 소프트 삭제 (작성자 본인 또는 MANAGE_MESSAGES) → `MESSAGE_DELETE` 팬아웃.
+async fn delete_message<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path((channel_id, message_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let cid = parse_channel(&channel_id)?;
+    let mid = parse_message(&message_id)?;
+
+    let msg = st.store.get_message(mid).await?.ok_or(ApiError::NotFound)?;
+    if msg.channel_id != cid {
+        return Err(ApiError::NotFound);
+    }
+    // 작성자 본인은 자기 메시지 삭제 가능. 타인 메시지는 MANAGE_MESSAGES(채널 컨텍스트) 필요.
+    if msg.author_id != user {
+        crate::perm::require_in_channel(&*st.store, cid, msg.realm_id, user, Permissions::MANAGE_MESSAGES).await?;
+    }
+    if !st.store.soft_delete_message(mid).await? {
+        return Err(ApiError::NotFound);
+    }
+
+    let payload = message_delete_payload(cid, mid);
+    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_DELETE".into(), payload).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_emoji(s: &str) -> Result<&str, ApiError> {
+    let e = s.trim();
+    if e.is_empty() || e.chars().count() > 64 {
+        return Err(ApiError::BadRequest("invalid emoji".into()));
+    }
+    Ok(e)
+}
+
+/// 본인 리액션 추가 (ADD_REACTIONS, 채널 컨텍스트) → `MESSAGE_REACTION_ADD` 팬아웃 (멱등).
+async fn add_reaction<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let cid = parse_channel(&channel_id)?;
+    let mid = parse_message(&message_id)?;
+    let emoji = validate_emoji(&emoji)?;
+
+    let msg = st.store.get_message(mid).await?.ok_or(ApiError::NotFound)?;
+    if msg.channel_id != cid {
+        return Err(ApiError::NotFound);
+    }
+    crate::perm::require_in_channel(
+        &*st.store,
+        cid,
+        msg.realm_id,
+        user,
+        Permissions::VIEW_CHANNEL | Permissions::ADD_REACTIONS,
+    )
+    .await?;
+
+    // 새로 추가된 경우에만 팬아웃 (멱등 — 중복은 조용히 OK).
+    if st.store.add_reaction(mid, user, emoji).await? {
+        let payload = reaction_payload(cid, mid, user, emoji);
+        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_ADD".into(), payload).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 본인 리액션 제거 (멤버) → `MESSAGE_REACTION_REMOVE` 팬아웃.
+async fn remove_reaction<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let cid = parse_channel(&channel_id)?;
+    let mid = parse_message(&message_id)?;
+    let emoji = validate_emoji(&emoji)?;
+
+    let msg = st.store.get_message(mid).await?.ok_or(ApiError::NotFound)?;
+    if msg.channel_id != cid {
+        return Err(ApiError::NotFound);
+    }
+    // 본인 리액션 제거엔 채널 조회 권한이면 충분.
+    crate::perm::require_in_channel(&*st.store, cid, msg.realm_id, user, Permissions::VIEW_CHANNEL).await?;
+
+    if st.store.remove_reaction(mid, user, emoji).await? {
+        let payload = reaction_payload(cid, mid, user, emoji);
+        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_REMOVE".into(), payload).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }

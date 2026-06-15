@@ -38,16 +38,13 @@ pub enum Routed {
     Forwarded { to: u64 },
 }
 
-/// 이 노드의 로컬 세션으로 배달할 메시지 (gateway가 WS로 push, 후속).
+/// 이 노드의 로컬 세션으로 배달할 이벤트 (gateway가 WS로 push). 범용 envelope (D39):
+/// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON(불투명, gateway가 배달 직전 역파싱).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDelivery {
     pub realm: RealmId,
-    pub channel_id: ChannelId,
-    pub message_id: MessageId,
-    pub author: UserId,
-    pub content: String,
-    /// 클라 멱등성 키 — 작성자 세션 에코용 (D34).
-    pub nonce: Option<String>,
+    pub t: String,
+    pub payload: String,
     /// 이 노드의 로컬 대상 유저들.
     pub user_ids: Vec<u64>,
 }
@@ -118,6 +115,19 @@ impl<T: NodeTransport> Router<T> {
             .clone()
     }
 
+    /// 링의 다른 노드 id 목록 (자기 제외). gossip 브로드캐스트 대상.
+    pub fn peer_ids(&self) -> Vec<u64> {
+        self.ring.node_ids().into_iter().filter(|n| *n != self.local_node_id).collect()
+    }
+
+    /// 모든 피어에 메시지 브로드캐스트 (presence gossip 등, 풀메시 D4). 전송 실패는 무시(fire-and-forget).
+    /// 단일노드면 피어가 없어 no-op.
+    pub async fn broadcast(&self, msg: NodeMessage) {
+        for p in self.peer_ids() {
+            let _ = self.transport.send(p, msg.clone()).await;
+        }
+    }
+
     /// 구독 라우팅 (D12).
     pub async fn route_subscribe(
         &self,
@@ -151,6 +161,7 @@ impl<T: NodeTransport> Router<T> {
     }
 
     /// 메시지 전송 (fire-and-forget). 로컬/원격 모두. 결과는 events→fanout 경로로 흐름.
+    /// `reference_message_id` = 답장 대상(D39).
     pub async fn route_send(
         &self,
         realm: RealmId,
@@ -158,6 +169,7 @@ impl<T: NodeTransport> Router<T> {
         author: UserId,
         content: String,
         nonce: Option<String>,
+        reference_message_id: Option<MessageId>,
     ) -> Result<Routed, RouterError> {
         match self.owner(realm) {
             None => Err(RouterError::NoOwner),
@@ -169,6 +181,7 @@ impl<T: NodeTransport> Router<T> {
                         author,
                         content,
                         nonce,
+                        reference_message_id,
                         reply: tx,
                     })
                     .await
@@ -185,6 +198,7 @@ impl<T: NodeTransport> Router<T> {
                             author: author.0.raw(),
                             content,
                             nonce,
+                            reference_message_id: reference_message_id.map(|r| r.0.raw()),
                         },
                     )
                     .await?;
@@ -201,21 +215,33 @@ impl<T: NodeTransport> Router<T> {
         author: UserId,
         content: String,
         nonce: Option<String>,
+        reference_message_id: Option<MessageId>,
     ) -> Result<MessageId, RouterError> {
         let (tx, rx) = oneshot::channel();
         self.local_realm(realm)
-            .send(RealmCommand::SendMessage { channel_id: channel, author, content, nonce, reply: tx })
+            .send(RealmCommand::SendMessage {
+                channel_id: channel,
+                author,
+                content,
+                nonce,
+                reference_message_id,
+                reply: tx,
+            })
             .await
             .map_err(|_| RouterError::ActorGone)?;
         rx.await.map_err(|_| RouterError::ActorGone)
     }
 
-    /// Realm 액터가 방출한 이벤트를 팬아웃 (소유 노드에서 실행).
-    /// 노드별로 그룹화 → 로컬 대상은 `LocalDelivery`로 반환, 원격 노드엔 `RealmFanout` 전송.
-    pub async fn fanout(&self, event: RealmEvent) -> Result<Vec<LocalDelivery>, RouterError> {
-        let RealmEvent::MessageCreated { realm, channel_id, message_id, author, content, nonce, targets } =
-            event;
-
+    /// 범용 이벤트 팬아웃 (소유 노드에서 실행, D39). 노드별로 그룹화 →
+    /// 로컬 대상은 `LocalDelivery`로 반환, 원격 노드엔 `RealmFanout`(t/payload) 전송.
+    /// `payload`는 생산 엣지가 직렬화한 JSON 문자열 — node는 통과만(P2).
+    pub async fn fanout(
+        &self,
+        realm: RealmId,
+        t: String,
+        payload: String,
+        targets: Vec<(UserId, u64)>,
+    ) -> Result<Vec<LocalDelivery>, RouterError> {
         let mut by_node: HashMap<u64, Vec<u64>> = HashMap::new();
         for (user, node) in targets {
             by_node.entry(node).or_default().push(user.0.raw());
@@ -226,11 +252,8 @@ impl<T: NodeTransport> Router<T> {
             if node == self.local_node_id {
                 local.push(LocalDelivery {
                     realm,
-                    channel_id,
-                    message_id,
-                    author,
-                    content: content.clone(),
-                    nonce: nonce.clone(),
+                    t: t.clone(),
+                    payload: payload.clone(),
                     user_ids,
                 });
             } else {
@@ -239,11 +262,8 @@ impl<T: NodeTransport> Router<T> {
                         node,
                         NodeMessage::RealmFanout {
                             realm_id: realm.0.raw(),
-                            channel_id: channel_id.0.raw(),
-                            message_id: message_id.0.raw(),
-                            author: author.0.raw(),
-                            content: content.clone(),
-                            nonce: nonce.clone(),
+                            t: t.clone(),
+                            payload: payload.clone(),
                             user_ids,
                         },
                     )
@@ -251,6 +271,32 @@ impl<T: NodeTransport> Router<T> {
             }
         }
         Ok(local)
+    }
+
+    /// 비-메시지 이벤트 emit 라우팅 (D39, `route_send`와 대칭). 로컬 소유면 액터로 Broadcast 명령,
+    /// 원격 소유면 `REALM_EMIT`로 위임 → 소유 노드가 구독자표로 팬아웃. fire-and-forget.
+    pub async fn route_emit(
+        &self,
+        realm: RealmId,
+        t: String,
+        payload: String,
+    ) -> Result<Routed, RouterError> {
+        match self.owner(realm) {
+            None => Err(RouterError::NoOwner),
+            Some(o) if o == self.local_node_id => {
+                self.local_realm(realm)
+                    .send(RealmCommand::Broadcast { t, payload })
+                    .await
+                    .map_err(|_| RouterError::ActorGone)?;
+                Ok(Routed::Local)
+            }
+            Some(o) => {
+                self.transport
+                    .send(o, NodeMessage::RealmEmit { realm_id: realm.0.raw(), t, payload })
+                    .await?;
+                Ok(Routed::Forwarded { to: o })
+            }
+        }
     }
 
     /// 수신한 노드 메시지 처리. RealmFanout이면 로컬 배달 반환.
@@ -276,7 +322,7 @@ impl<T: NodeTransport> Router<T> {
                     .map_err(|_| RouterError::ActorGone)?;
                 Ok(None)
             }
-            NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce } => {
+            NodeMessage::RealmSend { realm_id, channel_id, author, content, nonce, reference_message_id } => {
                 let (tx, _rx) = oneshot::channel();
                 self.local_realm(RealmId(Snowflake::from_raw(realm_id)))
                     .send(RealmCommand::SendMessage {
@@ -284,37 +330,48 @@ impl<T: NodeTransport> Router<T> {
                         author: UserId(Snowflake::from_raw(author)),
                         content,
                         nonce,
+                        reference_message_id: reference_message_id.map(|r| MessageId(Snowflake::from_raw(r))),
                         reply: tx,
                     })
                     .await
                     .map_err(|_| RouterError::ActorGone)?;
                 Ok(None)
             }
-            NodeMessage::RealmFanout {
-                realm_id,
-                channel_id,
-                message_id,
-                author,
-                content,
-                nonce,
-                user_ids,
-            } => Ok(Some(LocalDelivery {
+            NodeMessage::RealmFanout { realm_id, t, payload, user_ids } => Ok(Some(LocalDelivery {
                 realm: RealmId(Snowflake::from_raw(realm_id)),
-                channel_id: ChannelId(Snowflake::from_raw(channel_id)),
-                message_id: MessageId(Snowflake::from_raw(message_id)),
-                author: UserId(Snowflake::from_raw(author)),
-                content,
-                nonce,
+                t,
+                payload,
                 user_ids,
             })),
+            // 비소유 노드가 위임한 비-메시지 이벤트 → 로컬 소유 액터로 Broadcast (D39).
+            NodeMessage::RealmEmit { realm_id, t, payload } => {
+                self.local_realm(RealmId(Snowflake::from_raw(realm_id)))
+                    .send(RealmCommand::Broadcast { t, payload })
+                    .await
+                    .map_err(|_| RouterError::ActorGone)?;
+                Ok(None)
+            }
             // 생사 판정 (D23): PING 받으면 PONG 회신. 수신 시각 기록은 server inbound 루프가
             // 주입된 clock으로 수행(Router는 clock-free 유지). PONG/HELLO는 수신 자체가 liveness.
             NodeMessage::Ping => {
                 self.transport.send(inbound.src, NodeMessage::Pong).await?;
                 Ok(None)
             }
+            // presence gossip은 server inbound 루프가 gateway::presence로 직접 처리(Store+Hub 필요).
+            // 여기 도달하면(직접 호출 등) 무시 — node 코어는 friend/Hub를 모름(P2).
+            NodeMessage::PresenceGossip { .. } => Ok(None),
             NodeMessage::Pong | NodeMessage::Hello { .. } | NodeMessage::HelloAck { .. } => Ok(None),
         }
+    }
+}
+
+/// emit 포트 구현 (D39) — 엣지(rest-api)가 transport 제네릭을 모른 채 `Arc<dyn RealmEmitter>`로 주입.
+/// fire-and-forget: 라우팅 실패(소유 없음/액터 종료/전송)는 route_send와 동일하게 조용히 드롭한다.
+impl<T: NodeTransport> domain::emit::RealmEmitter for Router<T> {
+    fn emit(&self, realm: RealmId, t: String, payload: String) -> domain::emit::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self.route_emit(realm, t, payload).await;
+        })
     }
 }
 
@@ -408,10 +465,13 @@ mod tests {
 
         router.route_subscribe(realm, uid(1), 1).await.unwrap();
         let chan = ChannelId(Snowflake::from_raw(0xC0));
-        let mid = router.route_send_local(realm, chan, uid(1), "hello".into(), None).await.unwrap();
+        let mid = router.route_send_local(realm, chan, uid(1), "hello".into(), None, None).await.unwrap();
 
         let RealmEvent::MessageCreated { message_id, content, targets, .. } =
-            erx.recv().await.unwrap();
+            erx.recv().await.unwrap()
+        else {
+            panic!("expected MessageCreated");
+        };
         assert_eq!(message_id, mid);
         assert_eq!(content, "hello");
         assert_eq!(targets.len(), 1);
@@ -444,11 +504,15 @@ mod tests {
 
         // A가 노드1에서 메시지 전송
         let chan = ChannelId(Snowflake::from_raw(0xC0));
-        router1.route_send(realm, chan, uid(0xA), "hi".into(), None).await.unwrap();
+        router1.route_send(realm, chan, uid(0xA), "hi".into(), None, None).await.unwrap();
 
-        // 노드1: 액터 이벤트 수신 → 팬아웃
-        let event = erx1.recv().await.unwrap();
-        let local = router1.fanout(event).await.unwrap();
+        // 노드1: 액터 이벤트 수신 → 팬아웃 (드라이버가 payload 조립하는 자리를 테스트가 대신)
+        let RealmEvent::MessageCreated { realm: er, content, targets, .. } =
+            erx1.recv().await.unwrap()
+        else {
+            panic!("expected MessageCreated");
+        };
+        let local = router1.fanout(er, "MESSAGE_CREATE".into(), content, targets).await.unwrap();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].user_ids, vec![0xA]); // A는 노드1 로컬 배달
 
@@ -456,7 +520,56 @@ mod tests {
         let fan = r2.recv().await.unwrap();
         let delivery = router2.handle_inbound(fan).await.unwrap().unwrap();
         assert_eq!(delivery.user_ids, vec![0xB]);
-        assert_eq!(delivery.content, "hi");
+        assert_eq!(delivery.payload, "hi");
+        assert_eq!(delivery.t, "MESSAGE_CREATE");
+    }
+
+    /// D39 종단: 비소유 노드가 emit한 비-메시지 이벤트가 소유 노드로 위임(REALM_EMIT)되고,
+    /// 소유 노드 액터가 Broadcast로 방출 → 두 노드 구독자에게 범용 팬아웃되는 흐름.
+    #[tokio::test]
+    async fn broadcast_emit_fans_out_cross_node() {
+        let board = Switchboard::new();
+        let (t1, mut r1) = board.join(1, 64);
+        let (t2, mut r2) = board.join(2, 64);
+        let realm = first_realm_owned_by(&ring_2(), 1); // 노드1 소유
+
+        let (etx1, mut erx1) = mpsc::channel(64);
+        let (etx2, _erx2) = mpsc::channel(64);
+        let router1 = Router::new(1, mkgen(1), clk(), ring_2(), t1, etx1);
+        let router2 = Router::new(2, mkgen(2), clk(), ring_2(), t2, etx2);
+
+        // A@노드1(로컬), B@노드2(소유 노드1로 포워딩) 구독.
+        router1.route_subscribe(realm, uid(0xA), 1).await.unwrap();
+        assert_eq!(
+            router2.route_subscribe(realm, uid(0xB), 2).await.unwrap(),
+            Routed::Forwarded { to: 1 }
+        );
+        let sub = r1.recv().await.unwrap();
+        router1.handle_inbound(sub).await.unwrap();
+
+        // 노드2(비소유)에서 멤버 이벤트 emit → REALM_EMIT로 소유 노드1에 위임.
+        assert_eq!(
+            router2.route_emit(realm, "GUILD_MEMBER_ADD".into(), r#"{"x":1}"#.into()).await.unwrap(),
+            Routed::Forwarded { to: 1 }
+        );
+        // 노드1: REALM_EMIT 처리 → 액터 Broadcast 명령.
+        let emit_ib = r1.recv().await.unwrap();
+        assert!(router1.handle_inbound(emit_ib).await.unwrap().is_none());
+
+        // 노드1 액터가 Broadcast 이벤트 방출 → 팬아웃(드라이버가 payload 통과).
+        let RealmEvent::Broadcast { realm: er, t, payload, targets } = erx1.recv().await.unwrap()
+        else {
+            panic!("expected Broadcast");
+        };
+        let local = router1.fanout(er, t, payload, targets).await.unwrap();
+        assert_eq!(local.iter().flat_map(|d| d.user_ids.clone()).collect::<Vec<_>>(), vec![0xA]);
+
+        // 노드2: RealmFanout 수신 → B 배달 (t/payload 보존).
+        let fan = r2.recv().await.unwrap();
+        let d = router2.handle_inbound(fan).await.unwrap().unwrap();
+        assert_eq!(d.user_ids, vec![0xB]);
+        assert_eq!(d.t, "GUILD_MEMBER_ADD");
+        assert_eq!(d.payload, r#"{"x":1}"#);
     }
 
     /// 생사 판정 → 소유권 failover (D23): 소유 노드가 down으로 표시되면 다음 살아있는 노드가
@@ -482,8 +595,10 @@ mod tests {
         // 새 소유 노드에서 로컬 전송이 동작(액터가 새로 떠서 rehydrate).
         let chan = ChannelId(Snowflake::from_raw(0xC0));
         router2.route_subscribe(realm, uid(0xB), 2).await.unwrap();
-        router2.route_send_local(realm, chan, uid(0xB), "after-failover".into(), None).await.unwrap();
-        let RealmEvent::MessageCreated { content, .. } = erx.recv().await.unwrap();
+        router2.route_send_local(realm, chan, uid(0xB), "after-failover".into(), None, None).await.unwrap();
+        let RealmEvent::MessageCreated { content, .. } = erx.recv().await.unwrap() else {
+            panic!("expected MessageCreated");
+        };
         assert_eq!(content, "after-failover");
 
         // 노드1 복귀 → 소유권 환원(일관 해싱 re-join).
@@ -558,9 +673,13 @@ mod tests {
 
         // A가 노드1에서 전송 → 팬아웃.
         let chan = ChannelId(Snowflake::from_raw(0xC0));
-        router1.route_send(realm, chan, uid(0xA), "hi-tcp".into(), None).await.unwrap();
-        let event = erx1.recv().await.unwrap();
-        let local = router1.fanout(event).await.unwrap();
+        router1.route_send(realm, chan, uid(0xA), "hi-tcp".into(), None, None).await.unwrap();
+        let RealmEvent::MessageCreated { realm: er, content, targets, .. } =
+            erx1.recv().await.unwrap()
+        else {
+            panic!("expected MessageCreated");
+        };
+        let local = router1.fanout(er, "MESSAGE_CREATE".into(), content, targets).await.unwrap();
         assert_eq!(local.iter().flat_map(|d| d.user_ids.clone()).collect::<Vec<_>>(), vec![0xA]);
 
         // 노드2: 네트워크로 RealmFanout 수신 → B 배달.
@@ -569,6 +688,6 @@ mod tests {
             .expect("배달 타임아웃")
             .expect("채널 종료");
         assert_eq!(delivery.user_ids, vec![0xB]);
-        assert_eq!(delivery.content, "hi-tcp");
+        assert_eq!(delivery.payload, "hi-tcp");
     }
 }

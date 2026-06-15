@@ -241,15 +241,14 @@ mod tests {
             let _t2 = net.transport(2);
             for i in 0..20u64 {
                 t1.send(2, NodeMessage::RealmFanout {
-                    realm_id: i, channel_id: 0, message_id: i, author: 0,
-                    content: i.to_string(), nonce: None, user_ids: vec![],
+                    realm_id: i, t: "MESSAGE_CREATE".into(), payload: i.to_string(), user_ids: vec![],
                 }).await.unwrap();
             }
             net.advance_to(1000);
             net.take_inbound(2)
                 .into_iter()
                 .map(|ib| match ib.msg {
-                    NodeMessage::RealmFanout { content, .. } => content,
+                    NodeMessage::RealmFanout { payload, .. } => payload,
                     _ => String::new(),
                 })
                 .collect::<Vec<_>>()

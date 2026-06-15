@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "1.3.0"
+version = "1.9.0"
 dependencies = [
  "bitflags",
  "thiserror",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "1.4.0"
+version = "1.9.0"
 dependencies = [
  "auth",
  "axum",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "node"
-version = "1.2.0"
+version = "1.5.0"
 dependencies = [
  "actor-rt",
  "domain",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "1.0.0"
+version = "1.3.0"
 dependencies = [
  "domain",
  "thiserror",

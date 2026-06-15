@@ -5,6 +5,109 @@
 
 ---
 
+## [1.28.0] - 2026-06-15
+### 새 기능
+- **전역 presence (gossip, Phase 3, Q11/D12 → D42)** — 친구 온라인 여부. **D40/D41에서 남긴 크로스노드 유저 라우팅 seam을 닫는다**: Realm 무관 유저 이벤트를 풀메시 gossip broadcast + 로컬 친구 필터로 전 노드에 전파.
+  - **모델**: presence = 휘발 상태(DB-D5, 인메모리). user → (status, 그를 호스팅하는 노드 집합) — 노드 집합이 비면 offline("any node hosts → online", 멀티노드 정확). 현재 status는 online/offline(idle/dnd op 3은 후속).
+  - **전이**: gateway 세션이 유저의 **첫 live 세션** 연결 시 online, **마지막 live 세션** 종료 시 offline(detach 후 `Hub::live_count`로 판정). 전이 시 `PRESENCE_GOSSIP` 풀메시 브로드캐스트 + 그 유저의 로컬 친구에게 `PRESENCE_UPDATE` 배달.
+  - **gossip 수신**: server inbound 루프가 `PRESENCE_GOSSIP`을 받아 view 갱신 + 로컬 친구 통지(재브로드캐스트 없음 — 원본이 전 피어에 이미 전송). **READY 스냅샷에 친구 presence(`presences`) 포함**.
+  - `node`: 신규 **`presence::{Presence, Status}`** 레지스트리(노드 레벨 휘발 상태) + `Router::{broadcast, peer_ids}`(풀메시 D4) + `HashRing::node_ids`. 유닛 +2. (1.4→1.5)
+  - `protocol`: **`PRESENCE_GOSSIP`(0x0201)** wire(`user_id, node_id, status:u8`) + 라운드트립. (1.2→1.3)
+  - `gateway`: 신규 **`presence`** 모듈(set_online/set_offline/apply_gossip/notify_friends/ready_presences) + `Hub::{live_count, session_user}` + 세션 연결/해제 훅 + READY presences + `GatewayState.presence`. (1.8→1.9)
+  - server: `Presence` 생성·주입 + `run_inbound`이 `PRESENCE_GOSSIP` 분기 처리(`protocol` 의존 추가). 단일노드는 gossip 피어 0 = 로컬 presence만(정상).
+  - 친구 대상 산출은 relationships(D40) 재사용(`list_relationships` filter friend) — 새 repo 메서드 0. domain/storage/rest-api **변경 없음**.
+- 문서(R2): decisions **D42**(전역 presence gossip + 크로스노드 유저 라우팅), `protocol/node-wire.md`(PRESENCE_GOSSIP 바디 구체화), `api/gateway.md`(PRESENCE_UPDATE + READY presences), TODO 체크.
+- **라이브 검증**: ① 단일노드 — 친구 A 접속→친구 B가 PRESENCE_UPDATE online 수신, A 종료→offline, A READY에 B online. ② **2노드 mTLS — node1의 A 접속이 gossip을 타고 node2의 B에게 PRESENCE_UPDATE로 도달**(크로스노드 seam 닫힘 입증).
+- seam: 신규 노드 join 시 과거 presence 동기화(anti-entropy) 없음(델타 only) · idle/dnd(op 3) · presence는 휘발이라 전 노드 재시작 시 리셋 — 모두 후속.
+- 전 crate 테스트 합계 **103** (protocol 8 · node 19+2 · domain 18 · storage 12 · rest-api 16 · gateway 6 등). 마이그레이션 V1~V11(presence는 무DB).
+
+## [1.27.0] - 2026-06-15
+### 새 기능
+- **읽음 상태 (read_states, Phase 3, D41)** — 채널별 `last_read_message_id` + 안 읽은 멘션 수(`mention_count`). Discord UX의 미읽음 배지/멘션 카운트 원천.
+  - **ack**: `POST /channels/:cid/messages/:mid/ack` → last_read upsert + 그 이후 살아있는 멘션 수 재계산(한 문장). VIEW_CHANNEL 필요(DM은 default_everyone 폴백).
+  - **mention_count 유지**: dispatch 드라이버가 멘션 적재(D39) 직후 대상들의 `mention_count` +1(작성자 제외, 존재 유저만). 새 메시지는 항상 최신이라 단순 증가가 정확.
+  - **실시간 `MESSAGE_ACK`**: ack 시 본인 세션들에 통지(다른 기기 동기화) — **`UserEmitter`(D40) 재사용**. **READY 스냅샷에 `read_states` 포함**(자동구독 시점 상태 확보).
+  - `domain`: 신규 `read_state` 모듈(`ReadState`) + **`ReadStateRepository`** 포트(ack/bump_mentions/list) → `Store` 합류. (1.8→1.9)
+  - `storage`: `read_state` 어댑터(ack 재계산·bump upsert) + **V11 `0011_read_states.sql`**. DB 통합 테스트 +1. (1.8→1.9)
+  - `rest-api`: `routes/read_state`(`POST .../ack` + `GET /users/@me/read-states`) + `events` MESSAGE_ACK 페이로드. 통합 테스트 +1(ack 멘션 재계산·권한·경계). (1.8→1.9)
+  - `gateway`: dispatch가 멘션 카운트 bump + READY가 read_states 포함. (1.7→1.8)
+  - `cli`: `ack`/`read-states`. (1.8→1.9)
+- 문서(R2): decisions **D41**(읽음상태·mention_count 유지·MESSAGE_ACK via UserEmitter), `api/rest.md`(ack/read-states 엔드포인트)·`api/gateway.md`(MESSAGE_ACK + READY read_states), TODO 체크.
+- **라이브 검증**: owner가 bob 멘션 메시지 2개 전송 → bob read-states `mention_count=2`(실 dispatch bump) / bob READY 스냅샷에 read_states 포함 / bob ack → 0 + 본인 listen 세션이 `MESSAGE_ACK` 실시간 수신.
+- 전 crate 테스트 합계 **100** (domain 18 · storage 12 · rest-api 16 등). 마이그레이션 V1~V11 적용.
+
+## [1.26.0] - 2026-06-15
+### 새 기능
+- **친구 · 차단 (relationships, Phase 3, D40)** — Discord식 방향성 행(A↔B = 양쪽 행 2개)으로 친구 요청/수락/취소·거절/삭제 + 차단/해제. 상태 전이의 원자성(두 행)은 storage 트랜잭션.
+  - **상태기계**: 요청=내 행 `pending_out`/상대 `pending_in` → 수락 시 양쪽 `friend`. 차단=내 행 `blocked`+상대 행 제거. 제거=친구/대기는 양쪽, 차단은 내 행만.
+  - **DM 차단 게이팅 (permissions.md §5 seam 닫힘)**: 어느 한쪽이라도 차단했으면 **1:1 DM 열기 거부**(rest-api) + **1:1 DM 전송 거부**(gateway `can_send` 후단). 그룹DM은 미적용(Discord 동일).
+  - **유저 단위 실시간 통지**: 친구·차단은 Realm 무관 이벤트 → 새 **`UserEmitter` 포트**(D12의 "팬아웃 ↔ 전역 presence 분리"). gateway `Hub`가 구현(대상 유저의 이 노드 로컬 세션에 `RELATIONSHIP_ADD/_REMOVE` 배달), server가 rest-api `AppState`에 주입. ⚠ 크로스노드 유저 라우팅은 전역 presence/gossip(Q11) seam.
+  - `domain`: 신규 **`relationship`** 모듈(`RelationKind`/`Relationship`/`mirror`) + **`RelationshipRepository`** 포트(list/get/is_blocked_between/friend_request_or_accept/block/remove) → `Store` 합류. emit 모듈에 **`UserEmitter`** 포트. 유닛 +2. (1.7→1.8)
+  - `storage`: `relationship` 어댑터(전이 트랜잭션) + **V10 `0010_relationships.sql`**(`relation_kind` enum + `relationships` 테이블). DB 통합 테스트 +1(친구 생애주기·차단). (1.7→1.8)
+  - `rest-api`: `routes/relationship`(`GET`/`PUT`/`DELETE /users/@me/relationships[/:uid]`) + `events` 페이로드 + `AppState.user_emitter` + DM 열기 차단 게이팅. 통합 테스트 +2(친구·차단 상태기계 / 차단→DM 거부). (1.7→1.8)
+  - `gateway`: `Hub`가 `UserEmitter` 구현(로컬 세션 배달) + `can_send` 1:1 DM 차단 게이팅. (1.6→1.7)
+  - `cli`: `add-friend`/`block-user`/`remove-relationship`/`relationships`. (1.7→1.8)
+  - server: rest-api에 Hub를 `UserEmitter`로 주입.
+- 문서(R2): decisions **D40**(친구·차단 + UserEmitter 분리, Q11 seam), `permissions.md` §5(차단 강제 구현), `api/rest.md`(relationships 엔드포인트)·`api/gateway.md`(`RELATIONSHIP_*` + UserEmitter 경로), TODO 체크.
+- **라이브 검증**: alice→bob 친구 요청(bob 실시간 `RELATIONSHIP_ADD` 수신)→수락→friend / alice가 carol 차단 → 양방향 1:1 DM 열기 403 / 전송 경로 차단(블록 후 양쪽 send 403).
+- 전 crate 테스트 합계 **98** (domain 18 · storage 11 · rest-api 15 등). 마이그레이션 V1~V10 적용.
+
+## [1.25.0] - 2026-06-15
+### 새 기능
+- **DM / 그룹DM (D8/DB-D2, Phase 3)** — Realm 통일 추상(P4)의 쇼케이스. DM·그룹DM도 길드와 같은 `realms`+`channels`(+`members`)라서 **메시징·권한·분산 팬아웃 경로를 무변경으로 재사용**한다(gateway/node/protocol/server 변경 0). DM Realm은 @everyone 역할이 없어 권한 계산이 `default_everyone`으로 폴백 → 멤버면 전송·조회가 길드와 동일 경로로 통과.
+  - **1:1 DM**: `dm_pairs(user_lo,user_hi)` 중복 방지(find-or-create) — 같은 두 사람은 항상 같은 채널. 1:1 DM도 자기 Snowflake realm_id 발급(라우팅 해시 통일, DB-D2).
+  - **그룹DM**: 자체 realm(kind=group_dm, owner_id) + 채널 1개 + 참가자 members. 소유자만 참가자 추가/타인 제거, 본인 탈퇴 가능, 소유자 탈퇴 불가(고아화 방지).
+  - `domain`: 신규 **`dm`** 모듈(`RealmKind`/`RealmInfo`/`DmChannel`/`NewDm`/`NewGroupDm`/`order_pair`) + **`DmRepository`** 포트(find_dm/create_dm/create_group_dm/get_realm) → `Store` 합류. 유닛 2. (1.6→1.7)
+  - `storage`: `dm` 어댑터(1:1 트랜잭션 = realms+channels+members+dm_pairs / 그룹 트랜잭션) + **V9 `0009_dm_pairs.sql`**. DB 통합 테스트 +1(find-or-create 멱등·Conflict·그룹). (1.6→1.7)
+  - `rest-api`: `routes/dm` — `POST /users/@me/channels`(recipient_id=1:1 find-or-create / recipient_ids=그룹) + `PUT`/`DELETE /channels/:id/recipients/:uid`(소유자 추가·제거 / 본인 탈퇴). `events`에 `CHANNEL_RECIPIENT_ADD/_REMOVE` 페이로드. 통합 테스트 +2(1:1 멱등·멤버 게이팅 / 그룹 참가자 관리·소유자 보호). (1.6→1.7)
+  - `cli`: `open-dm`/`create-group-dm`/`add-recipient`/`remove-recipient`. (1.6→1.7)
+  - gateway/node/protocol/server: **변경 없음** — DM이 길드와 동일한 Realm 라우팅·자동구독(D13)·팬아웃을 그대로 탄다(P4 배당).
+- 문서(R2): decisions **D8**에 DM/그룹DM 구현 노트, `api/rest.md`(구현 현황 표에 DM/recipient 엔드포인트)·`api/gateway.md`(`CHANNEL_RECIPIENT_*` 이벤트), TODO 체크.
+- **라이브 검증**: 단일노드 서버에서 alice↔bob 1:1 DM 송수신(bob READY 자동구독→MESSAGE_CREATE 수신) + 그룹DM 생성·소유자 추가·비소유자 추가 403·신규 참가자 메시지 수신.
+- 권한/seam: 1:1 차단(blocked) 거부는 relationships 도입 후 seam(permissions.md §5). 신규 참가자 통지는 기존 접속 구독자 대상(D39 seam과 동일).
+- 전 crate 테스트 합계 **93** (domain 16 · storage 10 · rest-api 13 등). 마이그레이션 V1~V9 적용.
+
+## [1.24.0] - 2026-06-15
+### 새 기능
+- **메시지 답장 + 멘션 (D39)** (Phase 3) — 메시지 **생성(MESSAGE_CREATE)** 경로에 얹음(persist-then-fanout, D24).
+  - **답장**: `messages.reference_message_id`(구조적 입력)를 송신 경로 전체에 관통 — gateway `POST /channels/:id/messages` 바디 → `Router::route_send`/`route_send_local`(+param) → `RealmCommand::SendMessage` → `RealmEvent::MessageCreated` → wire `REALM_SEND`(크로스노드) → `NewMessage` persist → `MESSAGE_CREATE` payload. gateway가 참조 대상 검증(같은 채널의 살아있는 메시지, 아니면 400).
+  - **멘션**: content에서 파생 → 파이프라인 무변경. dispatch 드라이버가 persist 후 `domain::mention::parse_mentions`(`<@id>`/`<@!id>`, 중복제거)로 뽑아 **V8 `message_mentions`**(존재 유저만, UNNEST+WHERE EXISTS+멱등)에 적재 + `MESSAGE_CREATE` payload에 `mentions:[id]` 포함.
+  - `domain`: `message::{Message,NewMessage}`에 `reference_message_id`, 신규 `mention::parse_mentions`(+유닛 4), `MessageRepository::add_mentions`. (1.5→1.6)
+  - `protocol`: `REALM_SEND`에 `reference_message_id: Option<u64>` 관통(라운드트립 갱신). (1.1→1.2)
+  - `node`: `RealmCommand::SendMessage`/`RealmEvent::MessageCreated`/`route_send`/`route_send_local`/`handle_inbound`에 reference 관통. (1.3→1.4)
+  - `storage`: create/select에 `reference_message_id`, `add_mentions` 구현 + **V8 `0008_message_mentions.sql`**. DB 통합 테스트 +1(답장 reference + 멘션 존재유저 필터·멱등). (1.5→1.6)
+  - `gateway`: dispatch가 reference persist + 멘션 파싱·적재·payload, send 라우트가 `reference_message_id` 검증·전달. (1.5→1.6)
+  - `cli`: `send --reply <mid>`. (1.5→1.6)
+- 문서(R2): `02-schema.md` message_mentions DDL 수정(원안 nullable PK 무효 → 유저 멘션만 단순화, 역할 멘션 Phase 4), decisions **D39**에 답장·멘션 구현 추가, `api/rest.md`(전송 행)·`api/gateway.md`(MESSAGE_CREATE payload), TODO 체크.
+- 전 crate 테스트 합계 **88** (domain 14 · storage 9 등). 마이그레이션 V1~V8 적용.
+
+## [1.23.0] - 2026-06-15
+### 새 기능
+- **메시지 편집·삭제(소프트)·리액션 (D39)** (Phase 3) — D39 범용 envelope를 그대로 타고 `MESSAGE_UPDATE`/`MESSAGE_DELETE`/`MESSAGE_REACTION_ADD`/`_REMOVE` 실시간 통지(비-persist 팬아웃, 진실은 REST 트랜잭션이 DB에 기록).
+  - `domain`: `MessageRepository`에 `get_message/edit_message/soft_delete_message` + 신규 **`ReactionRepository`**(add/remove) → `Store` 합류. (1.4→1.5)
+  - `storage`: 편집(`edited_at`)·소프트삭제(`deleted_at`, 히스토리 `deleted_at IS NULL` 필터) 구현 + `reaction` 모듈 + **V7 `0007_reactions.sql`**(유니코드 emoji 1컬럼 PK). DB 통합 테스트 +1(편집/삭제/리액션 종단). (1.4→1.5)
+  - `rest-api`: `routes/message`에 `PATCH`/`DELETE /channels/:cid/messages/:mid`(편집=작성자 / 삭제=작성자·MANAGE_MESSAGES) + `PUT`/`DELETE .../reactions/:emoji/@me`(추가=ADD_REACTIONS 채널컨텍스트 / 제거=멤버). `events`에 메시지/리액션 페이로드 빌더. 통합 테스트 +2(편집·삭제 권한·소프트삭제 / 리액션 멱등·제거). (1.4→1.5)
+  - `cli`: `edit`/`delete-message`/`react`/`unreact`(emoji URL 인코딩, `urlencoding` 의존). (1.4→1.5)
+  - gateway/node/protocol/server: **변경 없음** — 편집/삭제/리액션이 D39 envelope·`RealmEmitter`·dispatch 분기를 그대로 재사용(범용화의 배당).
+- 문서(R2): `02-schema.md` reactions DDL 수정(원안 nullable PK 무효 → 유니코드 emoji 1컬럼 단순화 노트, 커스텀 이모지 Phase 4), decisions **D39**에 편집·삭제·리액션 구현 추가, `api/rest.md`·`api/gateway.md`(엔드포인트·MESSAGE_* 페이로드), TODO 체크.
+- 권한: 편집=작성자 본인, 삭제=작성자 또는 MANAGE_MESSAGES, 리액션 추가=ADD_REACTIONS(채널 컨텍스트)·제거=본인. 소프트 삭제는 히스토리에서 제외.
+- 전 crate 테스트 합계 **83** (storage 8 · rest-api 11 등). 마이그레이션 V1~V7 적용.
+
+## [1.22.0] - 2026-06-15
+### 새 기능
+- **멤버 관리 + 범용 Realm 이벤트 팬아웃 (D39)** (Phase 3) — 멤버 조회/nick수정/추방·탈퇴 REST + `GUILD_MEMBER_ADD/_UPDATE/_REMOVE` 실시간 통지. 메시지 전용이던 팬아웃 경로를 **범용 `(t, payload)` envelope**로 일반화(P4).
+  - `domain`: `member::Member` 엔티티 + **`emit::RealmEmitter` 포트**(repo 포트와 같은 자리, `dyn` 주입용 박스 future). `GuildRepository`에 `get_member/list_members/update_member_nick/remove_member` 추가 → `Store`. (1.3→1.4)
+  - `storage`: 멤버 4메서드 구현(역할 `array_agg`로 N+1 회피). DB 통합 테스트 +1(목록/닉/역할/제거+CASCADE). (1.3→1.4)
+  - `protocol`: `REALM_FANOUT`(0x0103) 바디를 `realm_id,t,payload,user_ids`로 일반화 + `REALM_EMIT`(0x0104) 신설(비소유→소유 위임). 라운드트립 테스트 +1. (1.0→1.1)
+  - `node`: `RealmEvent::Broadcast` + `RealmCommand::Broadcast`, `LocalDelivery`를 `(t,payload)` envelope로, `Router::fanout(realm,t,payload,targets)` 일반화 + `route_emit`(route_send 대칭) + `RealmEmitter` 구현. 테스트 +2(액터 Broadcast, 크로스노드 emit→fanout 종단). (1.2→1.3)
+  - `gateway`: dispatch 드라이버를 이벤트 종류로 분기(메시지만 persist, 멤버는 비-persist) + `deliver_local` 범용화(payload 1회 역파싱). (1.4→1.5)
+  - `rest-api`: `routes/member`(GET 목록/단건, PATCH nick, DELETE 추방·탈퇴, `@me` 지원) + `events`(멤버 페이로드 빌더) + invite redeem이 `GUILD_MEMBER_ADD` emit. `AppState`에 `Arc<dyn RealmEmitter>` 주입. 통합 테스트 +2(목록·셀프닉·탈퇴 emit / 추방 권한·소유자 보호). serde_json 정식 의존. (1.3.1→1.4)
+  - `server`: Router를 emit 포트로 rest-api에 주입.
+  - `cli`: `members`/`set-nick`/`kick`/`leave`(@me) 명령.
+- 권한: 조회=멤버, nick=본인 `CHANGE_NICKNAME`/타인 `MANAGE_NICKNAMES`, 추방 `KICK_MEMBERS`, 소유자 추방·탈퇴 불가(고아화 방지).
+- 문서(R2): decisions **D39** 신설, `node-wire.md` §4/§5(REALM_FANOUT 일반화·REALM_EMIT), `api/rest.md`·`api/gateway.md`(멤버 엔드포인트·GUILD_MEMBER 페이로드), TODO 멤버 관리 체크.
+- 전 crate 테스트: protocol 7 · node 17+2 · gateway 6 · rest-api 9(+2) · storage 7(+1, DB). 합계 80.
+
 ## [1.21.2] - 2026-06-14
 ### 테스트/품질
 - **rest-api 통합 테스트 7개 추가** (이전 0개) — in-memory `Store`(8개 repo trait 구현) + axum `oneshot`으로 DB 없이 핸들러·`AuthUser` 추출기·권한 강제·에러 매핑 검증. 커버: 무토큰 401, 길드 생성+@everyone, 채널생성 MANAGE_CHANNELS(비멤버 403/owner 단축), 초대 redeem→멤버화·미존재 404, 역할 생성 권한상승 방지, 역할 부여→권한 획득, **히스토리 VIEW_CHANNEL 게이팅 회귀 테스트**(1.21.1 수정분). dev-dep `tower`/`serde_json`. 전 crate 합계 74개.

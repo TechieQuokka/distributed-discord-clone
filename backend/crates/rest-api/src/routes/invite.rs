@@ -119,6 +119,14 @@ async fn redeem_invite<S: Store + 'static>(
         .await?
         .ok_or(ApiError::NotFound)?; // 미존재/만료/소진.
 
+    // GUILD_MEMBER_ADD 팬아웃 (D39) — 그 Realm의 현재 접속 멤버들에게 신규 합류 통지.
+    // 신규 합류자 본인은 미구독이라 이 응답(JoinView)/다음 READY로 상태 확보(D13).
+    if let Some(u) = st.store.find_by_id(user).await? {
+        let member = st.store.get_member(realm_id, user).await?;
+        let payload = crate::events::member_upsert_payload(realm_id, &u, member.as_ref());
+        let _ = st.emitter.emit(realm_id, "GUILD_MEMBER_ADD".into(), payload).await;
+    }
+
     let channels = st
         .store
         .list_by_realm(realm_id)

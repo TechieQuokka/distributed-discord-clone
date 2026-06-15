@@ -2,9 +2,13 @@
 
 pub mod auth;
 pub mod channel;
+pub mod dm;
 pub mod guild;
 pub mod invite;
+pub mod member;
 pub mod message;
+pub mod read_state;
+pub mod relationship;
 pub mod role;
 
 use domain::repo::Store;
@@ -17,6 +21,10 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(auth::routes::<S>())
         .merge(guild::routes::<S>())
         .merge(invite::routes::<S>())
+        .merge(dm::routes::<S>())
+        .merge(relationship::routes::<S>())
+        .merge(read_state::routes::<S>())
+        .merge(member::routes::<S>())
         .merge(role::routes::<S>())
         .merge(channel::routes::<S>())
         .merge(message::routes::<S>())

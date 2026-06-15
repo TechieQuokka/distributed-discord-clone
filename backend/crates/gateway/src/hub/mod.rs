@@ -120,6 +120,26 @@ impl Hub {
         self.inner.lock().unwrap().by_user.entry(user_id).or_default().insert(session_id);
     }
 
+    /// 세션의 소유 유저 id (RESUME 후 presence 전이용 — RESUME은 session_id만 알고 user는 모름).
+    pub fn session_user(&self, session_id: u64) -> Option<u64> {
+        self.inner.lock().unwrap().sessions.get(&session_id).map(|e| e.user_id)
+    }
+
+    /// 이 유저의 **live(소켓 연결된)** 세션 수 — presence 온/오프라인 전이 판정용(D12).
+    /// detach된(버퍼만 남은) 세션은 제외 → 모든 소켓이 끊기면 0 = offline 전이.
+    pub fn live_count(&self, user_id: u64) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .by_user
+            .get(&user_id)
+            .map(|set| {
+                set.iter()
+                    .filter(|sid| inner.sessions.get(sid).map(|e| e.live.is_some()).unwrap_or(false))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// 단일 세션에 dispatch (READY 등 세션 전용 이벤트). seq 부여 + 버퍼 적재 + live push.
     pub fn dispatch_one(&self, session_id: u64, t: &str, d: Value) {
         let mut inner = self.inner.lock().unwrap();
@@ -201,6 +221,24 @@ impl Hub {
         let replay: Vec<Outgoing> =
             e.buffer.iter().filter(|f| f.s.map(|s| s > last_seq).unwrap_or(false)).cloned().collect();
         ResumeOutcome::Resumed { rx, replay, last_seq: e.seq }
+    }
+}
+
+/// 유저 단위 실시간 이벤트 포트 구현 (친구·차단 등 Realm 무관 이벤트). rest-api가 `Arc<dyn UserEmitter>`로 주입.
+/// payload(직렬화된 JSON)를 역파싱해 대상 유저의 **이 노드 로컬 세션**에 배달한다.
+/// ⚠ 크로스노드(다른 노드의 세션)는 전역 presence/gossip(Q11) 도입 후의 seam.
+impl domain::emit::UserEmitter for Hub {
+    fn emit_to_users(
+        &self,
+        users: &[domain::id::UserId],
+        t: String,
+        payload: String,
+    ) -> domain::emit::BoxFuture<'_, ()> {
+        let ids: Vec<u64> = users.iter().map(|u| u.0.raw()).collect();
+        Box::pin(async move {
+            let d: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+            self.deliver(&ids, &ServerEvent { t, d });
+        })
     }
 }
 

@@ -10,6 +10,7 @@
 
 pub mod dispatch;
 pub mod hub;
+pub mod presence;
 pub mod protocol;
 pub mod routes;
 pub mod session;

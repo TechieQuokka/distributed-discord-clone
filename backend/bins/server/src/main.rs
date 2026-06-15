@@ -92,6 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         events_tx,
     ));
     let hub = Hub::new();
+    // 전역 presence 레지스트리 (Q11/D12, 휘발 DB-D5) — gateway 세션 훅 + inbound gossip 루프가 공유.
+    let presence = Arc::new(node::Presence::new());
 
     // persist-then-fanout 드라이버 (D24).
     tokio::spawn(gateway::run_dispatch(events_rx, Arc::clone(&router), Arc::clone(&store), hub.clone()));
@@ -107,10 +109,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let host = host_of(&peer.addr);
             transport.dial(peer.id, peer.addr.clone(), host, transport::client_config(&tls)?, inbound_tx.clone());
         }
-        // 수신: 원격 RealmSend→로컬 액터 / 원격 RealmFanout→로컬 세션 배달.
-        let router2 = Arc::clone(&router);
-        let hub2 = hub.clone();
-        tokio::spawn(run_inbound(inbound_rx, router2, hub2, Arc::clone(&clock)));
+        // 수신: 원격 RealmSend→로컬 액터 / 원격 RealmFanout→로컬 세션 배달 / PresenceGossip→presence 적용.
+        tokio::spawn(run_inbound(
+            inbound_rx,
+            Arc::clone(&router),
+            hub.clone(),
+            Arc::clone(&clock),
+            Arc::clone(&presence),
+            Arc::clone(&store),
+        ));
 
         // PING/PONG 생사 판정 (D23): 피어 down → 링 failover. interval 1s / timeout 3s.
         let peer_ids: Vec<u64> = c.peers.iter().map(|p| p.id).collect();
@@ -127,12 +134,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(node_id, "single-node mode (no cluster config)");
     }
 
-    // REST(auth/guild/history) 라우터.
+    // REST(auth/guild/history) 라우터. Router를 Realm emit 포트(D39, 멤버 변동 팬아웃),
+    // Hub를 유저 emit 포트(친구·차단 통지)로 주입.
     let rest = rest_api::router(AppState::new(
         Arc::clone(&store),
         Arc::clone(&keys),
         Arc::clone(&snowflakes),
         Arc::clone(&clock),
+        Arc::clone(&router) as Arc<dyn domain::emit::RealmEmitter>,
+        Arc::new(hub.clone()) as Arc<dyn domain::emit::UserEmitter>,
     ));
 
     // Gateway(WS + 메시지 전송) 라우터.
@@ -143,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snowflakes: Arc::clone(&snowflakes),
         clock: Arc::clone(&clock),
         hub,
+        presence: Arc::clone(&presence),
         local_node_id: node_id,
         heartbeat_interval_ms: 30_000,
     });
@@ -161,13 +172,21 @@ async fn run_inbound(
     router: Arc<Router<TcpTransport>>,
     hub: Hub,
     clock: Arc<dyn Clock>,
+    presence: Arc<node::Presence>,
+    store: Arc<PgStore>,
 ) {
     while let Some(inbound) = rx.recv().await {
         router.membership().record_seen(inbound.src, clock.now_ms());
-        match router.handle_inbound(inbound).await {
-            Ok(Some(delivery)) => gateway::deliver_local(&hub, &delivery).await,
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error = %e, "inbound handle failed"),
+        match inbound.msg {
+            // 전역 presence gossip(Q11/D12): view 갱신 + 그 유저의 로컬 친구에게 PRESENCE_UPDATE 배달.
+            protocol::NodeMessage::PresenceGossip { user_id, node_id, status } => {
+                gateway::presence::apply_gossip(&presence, &hub, &*store, user_id, node_id, status).await;
+            }
+            _ => match router.handle_inbound(inbound).await {
+                Ok(Some(delivery)) => gateway::deliver_local(&hub, &delivery).await,
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "inbound handle failed"),
+            },
         }
     }
 }

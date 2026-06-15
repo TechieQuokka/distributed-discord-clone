@@ -4,6 +4,7 @@
 //! 인증 흐름은 D14(2-토큰)/D15(Argon2id)를 따른다.
 
 pub mod error;
+pub mod events;
 pub mod extract;
 pub mod perm;
 pub mod routes;

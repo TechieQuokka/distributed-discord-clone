@@ -81,17 +81,19 @@ async fn scenario(seed: u64, cfg: SimConfig, partition_node2: bool) -> (u64, Vec
 
     // A가 노드1에서 전송 → 액터가 id·이벤트 확정.
     let chan = ChannelId(Snowflake::from_raw(0xC0));
-    let mid = r1.route_send_local(realm, chan, uid(0xA), "dst-msg".into(), None).await.unwrap();
+    let mid = r1.route_send_local(realm, chan, uid(0xA), "dst-msg".into(), None, None).await.unwrap();
 
-    // 이벤트 → 팬아웃 (노드2로 RealmFanout sim 전송).
-    let event = erx1.recv().await.unwrap();
-    let RealmEvent::MessageCreated { .. } = &event;
-    r1.fanout(event).await.unwrap();
+    // 이벤트 → 팬아웃 (노드2로 RealmFanout sim 전송). 드라이버가 payload 조립하는 자리를 테스트가 대신.
+    let RealmEvent::MessageCreated { realm: er, content, targets, .. } = erx1.recv().await.unwrap()
+    else {
+        panic!("expected MessageCreated");
+    };
+    r1.fanout(er, "MESSAGE_CREATE".into(), content, targets).await.unwrap();
 
     // 팬아웃이 노드2에 도착하도록 진행 + 수집.
     let delivered = drive(&net, 1000, &r1, &r2).await;
     let contents: Vec<String> = delivered.into_iter().flat_map(|d| {
-        d.user_ids.iter().map(move |_| d.content.clone()).collect::<Vec<_>>()
+        d.user_ids.iter().map(move |_| d.payload.clone()).collect::<Vec<_>>()
     }).collect();
     (mid.0.raw(), contents)
 }

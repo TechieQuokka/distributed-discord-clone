@@ -59,6 +59,16 @@ async fn ok_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result
     }
 }
 
+/// 본문 없는(204) 응답 — 성공 여부만.
+async fn ok_or_err(res: reqwest::Response) -> Result<(), String> {
+    let status = res.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{status}: {}", res.text().await.unwrap_or_default()))
+    }
+}
+
 #[derive(Serialize)]
 struct RegisterBody<'a> {
     username: &'a str,
@@ -230,9 +240,267 @@ pub async fn create_invite(
     ok_json(res).await
 }
 
+#[derive(Deserialize)]
+pub struct MemberView {
+    pub user_id: String,
+    pub nick: Option<String>,
+    pub joined_at: i64,
+    pub roles: Vec<String>,
+}
+
+pub async fn list_members(base: &str, token: &str, guild: &str) -> Result<Vec<MemberView>, String> {
+    let res = client()
+        .get(format!("{base}/guilds/{guild}/members"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Serialize)]
+struct SetNickBody<'a> {
+    nick: Option<&'a str>,
+}
+
+pub async fn set_nick(
+    base: &str,
+    token: &str,
+    guild: &str,
+    user: &str,
+    nick: Option<&str>,
+) -> Result<MemberView, String> {
+    let res = client()
+        .patch(format!("{base}/guilds/{guild}/members/{user}"))
+        .bearer_auth(token)
+        .json(&SetNickBody { nick })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 추방(타인) 또는 탈퇴(user="@me"). 204 No Content.
+pub async fn remove_member(base: &str, token: &str, guild: &str, user: &str) -> Result<(), String> {
+    let res = client()
+        .delete(format!("{base}/guilds/{guild}/members/{user}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{status}: {}", res.text().await.unwrap_or_default()))
+    }
+}
+
 pub async fn join_invite(base: &str, token: &str, code: &str) -> Result<JoinView, String> {
     let res = client()
         .post(format!("{base}/invites/{code}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Deserialize)]
+pub struct MessageView {
+    pub id: String,
+    #[allow(dead_code)]
+    pub channel_id: String,
+    #[allow(dead_code)]
+    pub author_id: String,
+    pub content: String,
+}
+
+#[derive(Serialize)]
+struct EditBody<'a> {
+    content: &'a str,
+}
+
+pub async fn edit_message(base: &str, token: &str, channel: &str, message: &str, content: &str) -> Result<MessageView, String> {
+    let res = client()
+        .patch(format!("{base}/channels/{channel}/messages/{message}"))
+        .bearer_auth(token)
+        .json(&EditBody { content })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+pub async fn delete_message(base: &str, token: &str, channel: &str, message: &str) -> Result<(), String> {
+    let res = client()
+        .delete(format!("{base}/channels/{channel}/messages/{message}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+pub async fn add_reaction(base: &str, token: &str, channel: &str, message: &str, emoji: &str) -> Result<(), String> {
+    let e = urlencoding::encode(emoji);
+    let res = client()
+        .put(format!("{base}/channels/{channel}/messages/{message}/reactions/{e}/@me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+pub async fn remove_reaction(base: &str, token: &str, channel: &str, message: &str, emoji: &str) -> Result<(), String> {
+    let e = urlencoding::encode(emoji);
+    let res = client()
+        .delete(format!("{base}/channels/{channel}/messages/{message}/reactions/{e}/@me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+#[derive(Deserialize)]
+pub struct DmChannelView {
+    pub id: String,
+    pub realm_id: String,
+    pub kind: String,
+    pub recipients: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct OpenDmBody<'a> {
+    recipient_id: &'a str,
+}
+
+/// 1:1 DM 열기 (find-or-create). 기존 있으면 같은 채널 반환.
+pub async fn open_dm(base: &str, token: &str, recipient_id: &str) -> Result<DmChannelView, String> {
+    let res = client()
+        .post(format!("{base}/users/@me/channels"))
+        .bearer_auth(token)
+        .json(&OpenDmBody { recipient_id })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Serialize)]
+struct OpenGroupBody {
+    recipient_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+/// 그룹DM 생성 (호출자 = 소유자).
+pub async fn create_group_dm(
+    base: &str,
+    token: &str,
+    recipient_ids: Vec<String>,
+    name: Option<String>,
+) -> Result<DmChannelView, String> {
+    let res = client()
+        .post(format!("{base}/users/@me/channels"))
+        .bearer_auth(token)
+        .json(&OpenGroupBody { recipient_ids, name })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 그룹DM 참가자 추가(소유자). 204.
+pub async fn add_recipient(base: &str, token: &str, channel: &str, user: &str) -> Result<(), String> {
+    let res = client()
+        .put(format!("{base}/channels/{channel}/recipients/{user}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+/// 그룹DM 참가자 제거(소유자) 또는 본인 탈퇴(user="@me"는 미지원 — 본인 id 사용). 204.
+pub async fn remove_recipient(base: &str, token: &str, channel: &str, user: &str) -> Result<(), String> {
+    let res = client()
+        .delete(format!("{base}/channels/{channel}/recipients/{user}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+#[derive(Deserialize)]
+pub struct RelationshipView {
+    pub user_id: String,
+    pub kind: String,
+}
+
+#[derive(Serialize)]
+struct PutRelationshipBody<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+}
+
+/// 친구 요청/수락(kind="friend") 또는 차단(kind="block").
+pub async fn put_relationship(base: &str, token: &str, user: &str, kind: &str) -> Result<RelationshipView, String> {
+    let res = client()
+        .put(format!("{base}/users/@me/relationships/{user}"))
+        .bearer_auth(token)
+        .json(&PutRelationshipBody { kind })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 친구 삭제/요청 취소·거절/차단 해제. 204.
+pub async fn delete_relationship(base: &str, token: &str, user: &str) -> Result<(), String> {
+    let res = client()
+        .delete(format!("{base}/users/@me/relationships/{user}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+pub async fn list_relationships(base: &str, token: &str) -> Result<Vec<RelationshipView>, String> {
+    let res = client()
+        .get(format!("{base}/users/@me/relationships"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Deserialize)]
+pub struct ReadStateView {
+    pub channel_id: String,
+    pub last_read_message_id: Option<String>,
+    pub mention_count: i32,
+}
+
+/// 채널을 메시지까지 읽음 처리(ack).
+pub async fn ack(base: &str, token: &str, channel: &str, message: &str) -> Result<ReadStateView, String> {
+    let res = client()
+        .post(format!("{base}/channels/{channel}/messages/{message}/ack"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+pub async fn list_read_states(base: &str, token: &str) -> Result<Vec<ReadStateView>, String> {
+    let res = client()
+        .get(format!("{base}/users/@me/read-states"))
         .bearer_auth(token)
         .send()
         .await
@@ -244,6 +512,8 @@ pub async fn join_invite(base: &str, token: &str, code: &str) -> Result<JoinView
 struct SendBody<'a> {
     content: &'a str,
     nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_message_id: Option<String>,
 }
 
 pub async fn send_message(
@@ -252,11 +522,12 @@ pub async fn send_message(
     channel: &str,
     content: &str,
     nonce: Option<String>,
+    reference_message_id: Option<String>,
 ) -> Result<(), String> {
     let res = client()
         .post(format!("{base}/channels/{channel}/messages"))
         .bearer_auth(token)
-        .json(&SendBody { content, nonce })
+        .json(&SendBody { content, nonce, reference_message_id })
         .send()
         .await
         .map_err(|e| e.to_string())?;

@@ -1,9 +1,11 @@
-//! 디스패치 드라이버 (개념: dispatch). Realm 액터 이벤트 → persist → 팬아웃 → 세션 배달.
+//! 디스패치 드라이버 (개념: dispatch). Realm 액터 이벤트 → (메시지면 persist) → 팬아웃 → 세션 배달.
 //!
-//! D24 persist-then-fanout: Realm 액터가 단일 소유자로 ID·순서를 확정해 이벤트를 방출하면,
-//! **단일 소비자**인 이 루프가 (1) Postgres 저장 → (2) Router::fanout(노드별 대상 산출) →
-//! (3) Hub로 로컬 세션에 push 한다. node 코어를 IO 무의존으로 유지(P2)하면서 순서는 보존
-//! (단일 액터가 순서대로 방출 → 단일 소비자가 순서대로 persist).
+//! D24 persist-then-fanout + D39 범용 envelope: Realm 액터가 단일 소유자로 ID·순서를 확정해
+//! 이벤트를 방출하면, **단일 소비자**인 이 루프가 처리한다.
+//! - `MessageCreated`: (1) Postgres 저장 → (2) MESSAGE_CREATE JSON 조립 → (3) `Router::fanout`.
+//! - `Broadcast`(멤버 변동 등): persist 없이 payload(이미 직렬화된 JSON)를 그대로 `Router::fanout`.
+//!
+//! JSON 단일 출처 = 생산 엣지(여기/REST). node·protocol은 payload를 불투명 문자열로 통과(P2).
 
 use std::sync::Arc;
 
@@ -16,21 +18,34 @@ use transport::NodeTransport;
 use crate::hub::Hub;
 use crate::protocol::ServerEvent;
 
-/// LocalDelivery → MESSAGE_CREATE JSON 페이로드(`d`). id는 문자열(Discord 관례).
-fn message_create_payload(d: &LocalDelivery) -> serde_json::Value {
+/// MESSAGE_CREATE JSON 페이로드(`d`). id는 문자열(Discord 관례). reference/mentions 포함(D39).
+#[allow(clippy::too_many_arguments)]
+fn message_create_payload(
+    message_id: u64,
+    channel_id: u64,
+    author: u64,
+    content: &str,
+    nonce: &Option<String>,
+    reference_message_id: Option<u64>,
+    mentions: &[u64],
+) -> serde_json::Value {
     serde_json::json!({
-        "id": d.message_id.0.raw().to_string(),
-        "channel_id": d.channel_id.0.raw().to_string(),
-        "author": { "id": d.author.0.raw().to_string() },
-        "content": d.content,
-        "nonce": d.nonce,
+        "id": message_id.to_string(),
+        "channel_id": channel_id.to_string(),
+        "author": { "id": author.to_string() },
+        "content": content,
+        "nonce": nonce,
+        "reference_message_id": reference_message_id.map(|r| r.to_string()),
+        "mentions": mentions.iter().map(|m| m.to_string()).collect::<Vec<_>>(),
     })
 }
 
-/// LocalDelivery를 로컬 세션들에 MESSAGE_CREATE로 배달.
+/// LocalDelivery를 로컬 세션들에 배달 (범용 envelope, D39). payload(JSON 문자열)를 1회 역파싱.
 /// dispatch 드라이버(로컬 소유)와 크로스노드 inbound 루프(원격 RealmFanout 수신) 양쪽이 사용.
 pub async fn deliver_local(hub: &Hub, d: &LocalDelivery) {
-    let event = ServerEvent { t: "MESSAGE_CREATE".into(), d: message_create_payload(d) };
+    let payload: serde_json::Value =
+        serde_json::from_str(&d.payload).unwrap_or(serde_json::Value::Null);
+    let event = ServerEvent { t: d.t.clone(), d: payload };
     hub.deliver(&d.user_ids, &event);
 }
 
@@ -42,44 +57,73 @@ pub async fn run_dispatch<S: Store + 'static, T: NodeTransport>(
     hub: Hub,
 ) {
     while let Some(ev) = events.recv().await {
-        let RealmEvent::MessageCreated {
-            realm,
-            channel_id,
-            message_id,
-            author,
-            content,
-            nonce,
-            ..
-        } = &ev;
+        let (realm, t, payload, targets) = match ev {
+            RealmEvent::MessageCreated {
+                realm,
+                channel_id,
+                message_id,
+                author,
+                content,
+                nonce,
+                reference_message_id,
+                targets,
+            } => {
+                // (1) persist (D24). nonce 중복이면 멱등 스킵 (D34).
+                let new = NewMessage {
+                    id: message_id,
+                    channel_id,
+                    realm_id: realm,
+                    author_id: author,
+                    content: content.clone(),
+                    nonce: nonce.clone(),
+                    reference_message_id,
+                };
+                match store.create_message(&new).await {
+                    Ok(true) => {}
+                    Ok(false) => continue, // 같은 nonce 재전송 — 이미 배달됨.
+                    Err(e) => {
+                        tracing::error!(error = %e, "message persist failed; skipping fanout");
+                        continue;
+                    }
+                }
+                // (2) 멘션 파싱(content 파생, D39) → 적재. 존재 유저만(어댑터 보장).
+                let mentions = domain::mention::parse_mentions(&content);
+                if let Err(e) = store.add_mentions(message_id, &mentions).await {
+                    tracing::warn!(error = %e, "mention persist failed (continuing)");
+                }
+                // 안 읽은 멘션 카운트 +1 (작성자 본인 제외). 새 메시지는 항상 최신 → 단순 증가가 정확.
+                let bump: Vec<domain::id::UserId> =
+                    mentions.iter().copied().filter(|u| *u != author).collect();
+                if let Err(e) = store.bump_mentions(channel_id, &bump).await {
+                    tracing::warn!(error = %e, "mention count bump failed (continuing)");
+                }
+                let mention_ids: Vec<u64> = mentions.iter().map(|u| u.0.raw()).collect();
 
-        // (1) persist (D24). nonce 중복이면 멱등 스킵 (D34).
-        let new = NewMessage {
-            id: *message_id,
-            channel_id: *channel_id,
-            realm_id: *realm,
-            author_id: *author,
-            content: content.clone(),
-            nonce: nonce.clone(),
-        };
-        match store.create_message(&new).await {
-            Ok(true) => {}
-            Ok(false) => continue, // 같은 nonce 재전송 — 이미 배달됨.
-            Err(e) => {
-                tracing::error!(error = %e, "message persist failed; skipping fanout");
-                continue;
+                // (3) MESSAGE_CREATE JSON 조립 (생산 엣지가 단일 출처, D39).
+                let payload = message_create_payload(
+                    message_id.0.raw(),
+                    channel_id.0.raw(),
+                    author.0.raw(),
+                    &content,
+                    &nonce,
+                    reference_message_id.map(|r| r.0.raw()),
+                    &mention_ids,
+                )
+                .to_string();
+                (realm, "MESSAGE_CREATE".to_string(), payload, targets)
             }
-        }
+            // 비-메시지 이벤트: persist 없이 그대로 (payload는 REST 엣지가 이미 직렬화, D39).
+            RealmEvent::Broadcast { realm, t, payload, targets } => (realm, t, payload, targets),
+        };
 
-        // (2) 팬아웃 대상 산출 (D12).
-        let deliveries = match router.fanout(ev).await {
+        // 팬아웃 대상 산출 (D12) + 로컬 세션 배달.
+        let deliveries = match router.fanout(realm, t, payload, targets).await {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!(error = %e, "fanout failed");
                 continue;
             }
         };
-
-        // (3) 로컬 세션 배달.
         for d in deliveries {
             deliver_local(&hub, &d).await;
         }

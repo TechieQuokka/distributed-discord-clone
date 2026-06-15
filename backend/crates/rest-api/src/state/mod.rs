@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use auth::TokenKeys;
+use domain::emit::{RealmEmitter, UserEmitter};
 use domain::id::SnowflakeGenerator;
 use domain::repo::Store;
 use node::clock::Clock;
@@ -16,6 +17,10 @@ pub struct AppState<S: Store> {
     pub keys: Arc<TokenKeys>,
     pub snowflakes: Arc<SnowflakeGenerator>,
     pub clock: Arc<dyn Clock>,
+    /// Realm 단위 실시간 이벤트 포트 (D39) — 멤버 변동 등을 구독자표로 팬아웃. server가 Router를 주입.
+    pub emitter: Arc<dyn RealmEmitter>,
+    /// 유저 단위 실시간 이벤트 포트 — 친구·차단 등 Realm 무관 이벤트. server가 Hub를 주입.
+    pub user_emitter: Arc<dyn UserEmitter>,
 }
 
 // Arc만 복제 (derive(Clone)은 S:Clone를 요구하므로 수동 구현).
@@ -26,6 +31,8 @@ impl<S: Store> Clone for AppState<S> {
             keys: Arc::clone(&self.keys),
             snowflakes: Arc::clone(&self.snowflakes),
             clock: Arc::clone(&self.clock),
+            emitter: Arc::clone(&self.emitter),
+            user_emitter: Arc::clone(&self.user_emitter),
         }
     }
 }
@@ -36,8 +43,10 @@ impl<S: Store> AppState<S> {
         keys: Arc<TokenKeys>,
         snowflakes: Arc<SnowflakeGenerator>,
         clock: Arc<dyn Clock>,
+        emitter: Arc<dyn RealmEmitter>,
+        user_emitter: Arc<dyn UserEmitter>,
     ) -> Self {
-        Self { store, keys, snowflakes, clock }
+        Self { store, keys, snowflakes, clock, emitter, user_emitter }
     }
 
     /// 현재 시각(unix seconds) — refresh 만료/검증용.

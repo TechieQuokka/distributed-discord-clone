@@ -92,6 +92,7 @@ offset  size  field
 | 0x0101 | `REALM_COMMAND` | →소유노드 | 클라 동작을 Realm 소유 노드로 전달 (메시지 전송 등) |
 | 0x0102 | `REALM_COMMAND_RESULT` | →출발노드 | 명령 결과/ACK 회신 |
 | 0x0103 | `REALM_FANOUT` | 소유노드→ | 구독자 보유 노드로 이벤트 푸시 지시 (D12) |
+| 0x0104 | `REALM_EMIT` | →소유노드 | 비-메시지 이벤트(멤버 변동 등) 팬아웃을 소유 노드에 위임 (D39) |
 | 0x0110 | `SUBSCRIBE` | →소유노드 | 유저 U(노드 N)가 Realm R 구독 등록 (D12) |
 | 0x0111 | `UNSUBSCRIBE` | →소유노드 | 구독 해제 |
 | 0x0201 | `PRESENCE_GOSSIP` | 양방향 | presence 델타 전파 (Phase 3, D12) |
@@ -132,10 +133,19 @@ target_users  : Vec<u64>       # 이 노드에서 푸시할 대상 유저 id
 ```
 - **seq와 JSON 인코딩은 세션 노드가 담당**: 수신 노드가 각 세션에 per-session `s`(D24)를 부여하고 JSON(D31)으로 변환해 클라에 push. → seq 소유권이 세션 노드에 유지됨.
 
-> **구현 현황 (Phase 1 cut).** 위 `REALM_COMMAND`/`REALM_FANOUT`은 edit/delete/react까지 포함한 목표 설계다. 현재 `protocol` crate는 메시지 전송 경로만 우선 구현한 **평탄한 서브셋**을 사용한다(액션 envelope·result는 후속):
-> - `REALM_SEND`(0x0101): `realm_id:u64, channel_id:u64, author:u64, content:String, nonce:Option<String>` — `SendMessage` 단일 액션에 해당.
-> - `REALM_FANOUT`(0x0103): `realm_id:u64, channel_id:u64, message_id:u64, author:u64, content:String, nonce:Option<String>, user_ids:Vec<u64>` — `MESSAGE_CREATE` 이벤트에 해당.
-> 즉 현재는 event_type/event_body 대신 메시지 필드를 직접 실어 보낸다. edit/delete/react 추가 시 액션·event_type envelope로 확장 예정.
+> **구현 현황 (Phase 3, D39 — 범용 envelope).** 위 `REALM_COMMAND`/`REALM_FANOUT`은 edit/delete/react까지 포함한 목표 설계다. 현재 `protocol` crate는 다음을 구현한다 — 메시지 전송은 전용 명령으로, 그 외 이벤트는 **범용 `(t, payload)` envelope**(D39)로:
+> - `REALM_SEND`(0x0101): `realm_id:u64, channel_id:u64, author:u64, content:String, nonce:Option<String>` — `SendMessage` 단일 액션(소유 노드에서 persist+ID 확정).
+> - `REALM_EMIT`(0x0104): `realm_id:u64, t:String, payload:String` — 비-메시지 이벤트(멤버 변동 등) 팬아웃을 소유 노드에 위임. `payload`=클라에 나갈 JSON을 미리 직렬화한 불투명 문자열(하위 계층은 파싱 안 함, D39/P2).
+> - `REALM_FANOUT`(0x0103): `realm_id:u64, t:String, payload:String, user_ids:Vec<u64>` — **모든 DISPATCH 이벤트 공용**. `t`=이벤트 이름(`MESSAGE_CREATE`/`GUILD_MEMBER_ADD` …), `payload`=직렬화된 JSON. (이전의 메시지 전용 평탄 필드는 payload 안으로 흡수.)
+> 즉 §5의 `event_type:u16 + event_body:Bytes`를 **`t:String + payload:String(JSON)`**로 구체화했다(가독·디버깅 우선, 압축은 후속 flags COMPRESSED). edit/delete/react도 같은 `REALM_FANOUT`에 `t`만 바꿔 실어 보낸다.
+
+### `PRESENCE_GOSSIP` (0x0201) — 구현됨 (Phase 3, Q11/D42)
+```
+user_id : u64
+node_id : u64     # 이 유저를 호스팅(해제)한 노드
+status  : u8      # user_status: 0=offline 1=online 2=idle 3=dnd
+```
+- 전역 presence 델타. 전이(첫/마지막 live 세션) 시 **모든 피어에 broadcast**(풀메시 D4). 수신 노드는 view 갱신 후 그 유저의 **로컬 친구**(relationships, D40)에게 `PRESENCE_UPDATE`(gateway JSON) 배달하고 **재브로드캐스트하지 않는다**(원본이 이미 전 피어 전송 → 루프 방지). Realm 무관 유저 라우팅 = D40/D41의 크로스노드 seam 해소.
 
 ### `REALM_COMMAND_RESULT` (0x0102)
 ```

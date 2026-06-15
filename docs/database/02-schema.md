@@ -242,23 +242,27 @@ CREATE TABLE attachments (
 CREATE INDEX ix_attachments_message ON attachments (message_id);
 
 -- 리액션: 유저별 행, 카운트는 집계
+-- ※ 구현 단순화 (V7, Phase 3): 유니코드 이모지 1컬럼(`emoji TEXT`)으로 PK 구성.
+--   원안의 PK `(message_id, user_id, emoji_id, emoji_unicode)`는 nullable 컬럼을 PK에 넣어
+--   Postgres에서 무효(PK 컬럼은 NOT NULL) → 커스텀 이모지(emoji_id)는 Phase 4 `emojis`와 함께 도입.
 CREATE TABLE reactions (
     message_id     BIGINT NOT NULL,
     user_id        BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    emoji_id       BIGINT,                                -- 커스텀 이모지면 사용
-    emoji_unicode  TEXT,                                  -- 유니코드 이모지면 사용
+    emoji          TEXT NOT NULL,                         -- 유니코드 이모지 (커스텀 emoji_id는 Phase 4)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (message_id, user_id, emoji_id, emoji_unicode),
-    CHECK (emoji_id IS NOT NULL OR emoji_unicode IS NOT NULL)
+    PRIMARY KEY (message_id, user_id, emoji)
 );
+CREATE INDEX ix_reactions_message ON reactions (message_id);
 
 -- 멘션 인덱스 ("나를 멘션한 메시지" 빠른 조회)
+-- ※ 구현 단순화 (V8, Phase 3): 유저 멘션만 `(message_id, user_id)` PK.
+--   원안의 `(message_id, user_id, role_id)`는 nullable 컬럼을 PK에 넣어 무효 → 역할 멘션은 Phase 4.
 CREATE TABLE message_mentions (
     message_id  BIGINT NOT NULL,
-    user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
-    role_id     BIGINT REFERENCES roles(id) ON DELETE CASCADE,
-    PRIMARY KEY (message_id, user_id, role_id)
+    user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, user_id)
 );
+CREATE INDEX ix_message_mentions_user ON message_mentions (user_id);
 ```
 
 ---

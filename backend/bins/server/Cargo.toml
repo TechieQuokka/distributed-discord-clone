@@ -10,6 +10,7 @@ rest-api = { path = "../../crates/rest-api" }
 node = { path = "../../crates/node" }
 storage = { path = "../../crates/storage" }
 transport = { path = "../../crates/transport" }
+protocol = { path = "../../crates/protocol" }
 domain = { path = "../../crates/domain" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync"] }
 tracing = "0.1.44"

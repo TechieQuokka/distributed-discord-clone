@@ -80,6 +80,14 @@ impl HashRing {
     pub fn node_count(&self) -> usize {
         self.ring.values().collect::<std::collections::HashSet<_>>().len()
     }
+
+    /// 링의 고유 노드 id 목록 (정렬). gossip 브로드캐스트 대상 산출용.
+    pub fn node_ids(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = self.ring.values().copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
 }
 
 #[cfg(test)]
