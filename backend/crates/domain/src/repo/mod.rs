@@ -2,10 +2,14 @@
 
 use core::future::Future;
 
+use crate::attachment::{Attachment, NewAttachment};
+use crate::audit::{AuditEntry, NewAuditEntry};
 use crate::channel::{Channel, NewChannel};
 use crate::dm::{DmChannel, NewDm, NewGroupDm, RealmInfo};
 use crate::guild::{Guild, NewGuild};
-use crate::id::{ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, UserId};
+use crate::id::{
+    AttachmentId, ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, UserId, WebhookId,
+};
 use crate::invite::{Invite, NewInvite};
 use crate::member::Member;
 use crate::message::{Message, NewMessage};
@@ -14,7 +18,9 @@ use crate::read_state::ReadState;
 use crate::refresh_token::{NewRefreshToken, RefreshToken};
 use crate::relationship::{RelationKind, Relationship};
 use crate::role::{NewRole, Role};
+use crate::thread::{NewThread, Thread};
 use crate::user::{NewUser, User};
+use crate::webhook::{NewWebhook, Webhook};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
@@ -353,6 +359,17 @@ pub trait MessageRepository: Send + Sync {
         message_id: MessageId,
         users: &[UserId],
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 전문검색 (Q10, Postgres FTS). `realm` 안에서 `channels`(호출측이 VIEW_CHANNEL로 필터한
+    /// 허용 채널)에 한해 `query`(websearch 구문)에 매칭되는 살아있는 메시지를 최신순 `limit`개.
+    /// `channels`가 비면 결과 없음. 권한 판정은 호출측(라우트)이 수행.
+    fn search_messages(
+        &self,
+        realm: RealmId,
+        channels: &[ChannelId],
+        query: &str,
+        limit: i64,
+    ) -> impl Future<Output = Result<Vec<Message>, RepoError>> + Send;
 }
 
 /// 리액션 저장소 port (Phase 3, D39, 스키마 `reactions` V7). 유니코드 emoji.
@@ -399,6 +416,84 @@ pub trait ReadStateRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ReadState>, RepoError>> + Send;
 }
 
+/// 스레드 저장소 port (Phase 4, 스키마 `thread_meta` V13). 스레드 = channels(kind=thread)+thread_meta.
+///
+/// 채널 생성/조회는 [`ChannelRepository`]를 재사용하고, 여기선 thread_meta 보강 + 부모별 목록만.
+pub trait ThreadRepository: Send + Sync {
+    /// 스레드 생성(트랜잭션): channels(kind='thread', parent_id) + thread_meta(owner) 한 번에.
+    fn create_thread(&self, t: &NewThread) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 스레드 단건 조회 (channels+thread_meta 조인, message_count 집계). 스레드 아니면 None.
+    fn get_thread(
+        &self,
+        channel: ChannelId,
+    ) -> impl Future<Output = Result<Option<Thread>, RepoError>> + Send;
+
+    /// 부모 채널의 스레드 목록 (최신순).
+    fn list_threads(
+        &self,
+        parent: ChannelId,
+    ) -> impl Future<Output = Result<Vec<Thread>, RepoError>> + Send;
+
+    /// 스레드 아카이브/해제. 스레드였으면 `Ok(true)`.
+    fn set_thread_archived(
+        &self,
+        channel: ChannelId,
+        archived: bool,
+    ) -> impl Future<Output = Result<bool, RepoError>> + Send;
+}
+
+/// 첨부 메타 저장소 port (Phase 4, D37, 스키마 `attachments` V14). 바이트는 [`crate::blob::BlobStore`].
+pub trait AttachmentRepository: Send + Sync {
+    fn add_attachment(&self, a: &NewAttachment) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 메시지의 첨부 목록.
+    fn list_attachments(
+        &self,
+        message_id: MessageId,
+    ) -> impl Future<Output = Result<Vec<Attachment>, RepoError>> + Send;
+
+    /// 첨부 단건 조회 (다운로드 시 메시지→채널 권한 판정용). 없으면 None.
+    fn get_attachment(
+        &self,
+        id: AttachmentId,
+    ) -> impl Future<Output = Result<Option<Attachment>, RepoError>> + Send;
+}
+
+/// 웹훅 저장소 port (Phase 4, 스키마 `webhooks` V15). 토큰으로 채널에 메시지 게시.
+pub trait WebhookRepository: Send + Sync {
+    fn create_webhook(&self, w: &NewWebhook) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 채널의 웹훅 목록.
+    fn list_webhooks(
+        &self,
+        channel_id: ChannelId,
+    ) -> impl Future<Output = Result<Vec<Webhook>, RepoError>> + Send;
+
+    /// 단건 조회 (실행 시 token_hash 검증용). 없으면 None.
+    fn get_webhook(
+        &self,
+        id: WebhookId,
+    ) -> impl Future<Output = Result<Option<Webhook>, RepoError>> + Send;
+
+    /// 웹훅 삭제. 있었으면 `Ok(true)`.
+    fn delete_webhook(&self, id: WebhookId) -> impl Future<Output = Result<bool, RepoError>> + Send;
+}
+
+/// 감사 로그 저장소 port (Phase 4, 스키마 `audit_log_entries` V16).
+pub trait AuditRepository: Send + Sync {
+    /// 감사 항목 기록. 실패해도 주 동작은 진행(호출측이 warn) — 기록은 best-effort.
+    fn log_audit(&self, e: &NewAuditEntry) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 길드 감사 로그 (최신순, `before` Snowflake 커서 + limit).
+    fn list_audit(
+        &self,
+        realm: RealmId,
+        before: Option<u64>,
+        limit: i64,
+    ) -> impl Future<Output = Result<Vec<AuditEntry>, RepoError>> + Send;
+}
+
 /// 모든 저장소 port를 한 타입이 구현 — 조합 루트에서 제네릭 1개로 주입 (제네릭 폭발 방지).
 pub trait Store:
     UserRepository
@@ -413,6 +508,10 @@ pub trait Store:
     + MessageRepository
     + ReactionRepository
     + ReadStateRepository
+    + ThreadRepository
+    + AttachmentRepository
+    + WebhookRepository
+    + AuditRepository
 {
 }
 
@@ -429,5 +528,9 @@ impl<T> Store for T where
         + MessageRepository
         + ReactionRepository
         + ReadStateRepository
+        + ThreadRepository
+        + AttachmentRepository
+        + WebhookRepository
+        + AuditRepository
 {
 }

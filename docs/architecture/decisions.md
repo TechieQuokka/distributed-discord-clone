@@ -3,7 +3,7 @@
 > Discord 클론 — 공부 + 포트폴리오용. 로컬 전용, 이론 확립.
 > 철학: **"공부는 실전처럼"** — 실제로 수만 명을 붙이진 않지만, *수만 동접을 감당할 수 있는 구조*로 설계하고 로컬 시뮬레이션으로 증명한다.
 >
-> 최종 갱신: 2026-06-15 (D43 + Phase 4 인증/봇방지 구현: PoW D18 · rate limit D32 · TOTP MFA D19)
+> 최종 갱신: 2026-06-16 (**Phase 4 완료**: PoW D18 · rate limit D32 · TOTP MFA D19 · 전문검색 Q10 · 스레드/포럼 D44 · 파일첨부 D37 · 웹훅 · 감사로그 · 메시지 RANGE 파티셔닝 D28)
 
 ---
 
@@ -239,9 +239,11 @@
   클라가 재연결+RESUME으로 복구(D24). 노드↔노드는 `TcpTransport`의 피어 writer 채널 bounded(256) + `send().await`로
   자연 백프레셔(드롭 아님). 액터 메일박스도 bounded(`spawn(actor, 256)`).
 
-### D28. DB 접근 = sqlx
+### D28. DB 접근 = sqlx + 메시지 RANGE 파티셔닝
 - `sqlx` (async + **컴파일타임 쿼리 검증** → 파라미터 바인딩 강제, D20과 일석이조). 마이그레이션 Phase 0부터.
-- 메시지 파티셔닝: Phase 1~3 단일 테이블 + 인덱스 `(realm_id, id DESC)`. **Phase 4에서 Snowflake 시간 RANGE 파티셔닝**(월별).
+- 메시지 파티셔닝: Phase 1~3 단일 테이블 + 인덱스 `(channel_id, id DESC)`. **Phase 4에서 Snowflake 시간 RANGE 파티셔닝**(월별).
+- **구현(Phase 4, v1.38, V17)**: `messages`를 `PARTITION BY RANGE (id)`로 드롭&재생성(로컬 데이터 폐기). 월별 파티션(id 경계 = `(month_start_ms - EPOCH_MS) << 22`) + `messages_default` 캐치올. 인덱스(`ix_messages_channel`, FTS GIN)는 부모에 정의→파티션 상속. **신규 월 파티션 사전 생성은 운영 작업**(04 §6, 현재 DEFAULT 흡수).
+- **nonce 멱등(D34)과의 충돌 해소**: Postgres는 파티션 테이블 유니크 인덱스에 파티션 키(id) 포함을 강제 → `uq(channel,author,nonce)` 불가 → **앱레벨 dedup으로 이전**(D34 참조). **첨부 FK는 유지**(PG 12+가 파티션 부모 참조 FK+CASCADE 지원 → 04 §2의 앱레벨 완화(a)는 불필요).
 
 ### D29. 멀티노드 로컬 실행 = dev 런처
 - `cargo xtask`/`just` 레시피가 클러스터 config(D5 정적 노드목록) 읽어 N노드 기동. Postgres는 기존 로컬.
@@ -270,6 +272,7 @@
 
 ### D34. 메시지 멱등성 = 클라 nonce
 - at-least-once(D24) 재전송 중복 방지: 클라가 보내는 **nonce로 dedup**(Discord 방식).
+- **구현 변경(Phase 4, v1.38 — 파티셔닝 D28)**: 초기엔 `uq_messages_nonce(channel_id, author_id, nonce)` 부분 유니크 인덱스로 DB가 강제했으나, 메시지를 RANGE(id) 파티셔닝하면서 **앱레벨 dedup으로 이전**(Postgres가 파티션 유니크에 파티션 키 포함을 강제 → 부분 유니크 불가). `create_message`가 가드 INSERT(`SELECT ... WHERE $nonce IS NULL OR NOT EXISTS (동일 channel,author,nonce)`)로 dedup한다. **레이스 안전성**: 송신 경로의 persist는 dispatch 드라이버(events 채널의 **단일 직렬 소비자**, D24)만 수행 → 동시 INSERT 없음. 사용자 승인 결정.
 
 ### D35. 읽기 캐싱 = Realm 액터 인메모리
 - Redis 없음 → **Realm 액터가 최근 N개 메시지 bounded 캐시**. 콜드 데이터는 Postgres 직격.
@@ -277,8 +280,10 @@
 ### D36. 프로토콜 버저닝 = 헤더 version 바이트
 - 수제 바이트 프레임 헤더에 **version 1바이트**. 롤링 재시작/DST 재현 시 포맷 진화 대비.
 
-### D37. 파일 첨부 = 로컬 FS (Phase 4)
+### D37. 파일 첨부 = 로컬 FS (Phase 4) — 구현됨 (v1.35)
 - 로컬 파일시스템으로 시작. **MinIO(S3 호환)** 는 선택적 업그레이드.
+- **구현(Phase 4)**: 메타데이터와 바이트를 **분리**한다 — 메타(`attachments` V14: filename/size/content_type/url)는 `AttachmentRepository`(PgStore), 바이트는 **`domain::blob::BlobStore` 포트** 뒤로(로컬 FS=`storage::LocalFsBlobStore`, MinIO/S3는 같은 포트의 후속 adapter). domain은 둘 다 포트로만 안다(P2/P6). key=첨부 Snowflake id(경로 탈출 차단).
+- **사후 첨부(seam)**: 전송 경로가 비동기(gateway→Router→actor, 업로드 시점 message_id 없음)라 **이미 존재하는 메시지에 첨부**로 단순화. REST `POST /channels/:cid/messages/:mid/attachments`(멀티파트, 작성자+ATTACH_FILES, 8 MiB) · `GET .../attachments`(목록) · `GET /attachments/:id`(다운로드, 채널 VIEW_CHANNEL). 전송 시 동시 첨부·width/height·MinIO·스트리밍은 후속.
 
 ### D38. 페이지네이션 = Snowflake 커서
 - 메시지 히스토리 = `before`/`after`/`around` + Snowflake 커서.
@@ -329,6 +334,15 @@
 - **견고성**: `Hub::deliver`는 로컬 세션 없는 유저를 자동 스킵 → 디렉터리가 약간 stale해도 **무해(no-op)**. 디렉터리에 없는 유저(오프라인)는 어차피 받을 세션이 없어 정상 드롭.
 - **남은 seam**: 디렉터리는 **live(온라인) 세션**만 추적 → 원격 노드에서 detach-grace 중인 세션은 in-flight 이벤트를 못 받음(RESUME/다음 READY 스냅샷으로 상태 확보) · 신규 노드 anti-entropy 없음(D42와 동일, Phase 5).
 
+### D44. 스레드/포럼 = 부모를 가리키는 채널 (P4 재사용)
+- **문제**: 스레드/포럼을 별도 1급 개념으로 두면 메시징·팬아웃·권한 경로가 또 갈라진다(특수 케이스 번짐 = 지난 실패 패턴).
+- **결정 (Phase 4, P4)**: 스레드를 **채널의 한 종류**로 흡수한다. 스레드 = 부모 채널과 **같은 Realm의 `channels`(kind='thread', parent_id=부모) 한 행** + `thread_meta`(owner/archived/auto_archive) 보강(V13). 포럼 = `channels.kind='forum'` 컨테이너.
+  - **무변경 재사용**: Realm 액터는 realm 단위 구독자표(D12)로 팬아웃하므로, 스레드 채널 메시지도 **기존 메시지 경로(gateway send → Router → RealmActor → dispatch persist-then-fanout)를 그대로** 탄다. 자동구독(D13)도 realm 단위라 스레드 명시 join 불필요. → gateway/node/protocol/server 코드 추가 0.
+  - **권한**: 생성=`CREATE_PUBLIC_THREADS`(부모 채널 컨텍스트), 아카이브=소유자 또는 `MANAGE_THREADS`. `default_everyone`에 CREATE_PUBLIC_THREADS·SEND_MESSAGES_IN_THREADS 추가(기본 사용 가능, Discord 정렬). 스레드 채널 자체엔 오버라이드 없어 권한이 realm 역할로 폴백(DM과 같은 메커니즘, D8).
+  - **message_count**: `thread_meta` 컬럼은 스키마 충실성용이고, 실제 값은 **조회 시 `messages` 집계** — 쓰기 핫패스에 카운터 결합을 만들지 않는다.
+  - 어댑터: `domain::thread`(`Thread`/`NewThread`) + `ThreadRepository`(storage 트랜잭션). REST `POST/GET /channels/:id/threads`·`PATCH /channels/:id/thread` + `THREAD_CREATE`/`THREAD_UPDATE` 팬아웃(D39 envelope).
+- **남은 seam**: SEND_MESSAGES_IN_THREADS 분리 강제(현재 SEND_MESSAGES만)·포럼 태그(`forum_tags`)·자동 아카이브 만료 스케줄·스레드 멤버 명시 목록은 후속.
+
 ---
 
 ## 4. Discord Backend 도메인 지형도 (참고)
@@ -371,7 +385,7 @@
 ### 남은 자잘한 디테일 (Phase 진입 시 결정)
 - [ ] **Q7. 액터 supervisor/재시작 전략** (D23이 큰 틀, 세부는 Phase 2).
 - [x] ~~**Q9. CLI 시나리오 스크립트 포맷**~~ → 해결: CLI `scenario` 서브커맨드(헤드리스 종단 자동 검증 — 가입→길드→WS구독→전송→MESSAGE_CREATE 수신, PASS/FAIL+exit code). 별도 스크립트 DSL 없이 코드 시나리오로 시작, 필요 시 후속 확장.
-- [ ] **Q10. 검색 구현** — Postgres FTS 유력, Phase 4.
+- [x] ~~**Q10. 검색 구현**~~ → 해결 (Phase 4, v1.33): **Postgres FTS**. `messages.content_tsv`(tsvector STORED 생성 컬럼, config=`simple`) + GIN 인덱스(`ix_messages_fts`, 04 §5). 쿼리는 `websearch_to_tsquery`(안전 파싱). REST `GET /guilds/:id/messages/search` — 길드 단위 검색이되 결과는 **VIEW_CHANNEL 있는 채널로 한정**(채널 오버라이드 존중, D17). 외부 검색엔진(Elasticsearch) 회피 = 로컬 study 범위 적합. seam: author/before/after 필터·ts_rank 랭킹은 후속.
 - [~] **Q11. gossip discovery + 전역 presence** — 전역 presence=**D42**, 크로스노드 유저 라우팅=**D43** 완료. 남은 것: **gossip discovery(SWIM 동적 노드 합류·presence anti-entropy)** = Phase 5.
 
 ---

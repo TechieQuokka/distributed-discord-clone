@@ -12,9 +12,12 @@
 - 시간순 정렬 가능 → `id DESC` 인덱스가 곧 시간 정렬. `created_at`은 편의 중복 컬럼.
 - ⚠ **클럭 스큐**: 노드 간 시계가 틀어지면 ID의 전역 시간순이 약간 어긋남. Realm 내 순서는 액터가 보장(D24)하므로 무해. NTP 권장 수준.
 
-## 2. 메시지 파티셔닝 (Phase 4)
+## 2. 메시지 파티셔닝 (구현됨 Phase 4, v1.38, 마이그레이션 V17)
 
-메시지는 압도적 다수 행 → 유일하게 파티셔닝이 필요한 테이블.
+메시지는 압도적 다수 행 → 유일하게 파티셔닝이 필요한 테이블. **V17에서 `PARTITION BY RANGE (id)` 전환**(드롭&재생성, 로컬 데이터 폐기). 월별 파티션(`messages_2026_06`/`_07`) + `messages_default` 캐치올, 인덱스는 부모 정의→상속.
+
+> **nonce 멱등(D34) 영향**: 파티션 테이블 유니크 인덱스는 파티션 키(id) 포함 강제 → `uq(channel,author,nonce)` 불가 → nonce dedup을 **앱레벨**(create_message 가드 INSERT, dispatch 단일 직렬 소비자라 레이스 없음)로 이전. decisions D34 참조.
+> **첨부 FK**: PG 12+는 파티션 부모 참조 FK + CASCADE 지원 → 아래 (a) 앱레벨 완화는 **불필요**(`attachments.message_id → messages(id)` CASCADE 유지). reactions/message_mentions는 원래 FK 없음.
 
 ### 전략: Snowflake 시간 기준 RANGE 파티셔닝 (월별)
 ```sql
@@ -72,14 +75,16 @@ CREATE TABLE messages_2026_06 PARTITION OF messages
 | refresh_tokens | `uq(token_hash)`, `(user_id) WHERE active` | 인증/폐기 |
 | audit_log | `(realm_id, id DESC)` | 감사 로그 시간순 |
 
-## 5. 검색 (Q10, Phase 4)
+## 5. 검색 (Q10) — 구현됨 (Phase 4, v1.33, 마이그레이션 V12)
 - **Postgres 전문검색(FTS)**: `tsvector` 생성 컬럼 + GIN 인덱스. 외부 검색엔진(Elasticsearch) 회피 — 로컬 study 범위에 적합.
 ```sql
+-- 0012_message_fts.sql (적용됨)
 ALTER TABLE messages ADD COLUMN content_tsv tsvector
     GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;
 CREATE INDEX ix_messages_fts ON messages USING GIN (content_tsv);
 ```
-- 파티셔닝과 결합 시 각 파티션에 GIN 인덱스가 상속됨.
+- 쿼리: `content_tsv @@ websearch_to_tsquery('simple', $q)` (사용자 입력 안전 파싱). REST `GET /guilds/:id/messages/search`(멤버 + VIEW_CHANNEL 채널 한정, D17).
+- 파티셔닝(D28) 전환 시 각 파티션에 GIN 인덱스가 상속됨 — 파티션 재생성 마이그레이션이 `content_tsv` 생성 컬럼 + GIN을 함께 정의한다.
 
 ## 6. 마이그레이션 운영
 - `sqlx migrate` — 순번 SQL 파일. Phase 0부터 버전 관리.

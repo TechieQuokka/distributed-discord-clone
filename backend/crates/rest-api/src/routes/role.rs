@@ -93,6 +93,11 @@ async fn create_role<S: Store + 'static>(
     st.store
         .create_role(&NewRole { id, realm_id: realm, name: name.to_owned(), permissions: requested })
         .await?;
+    crate::routes::audit::record(
+        &st, realm, user, domain::audit::AuditAction::RoleCreate, Some(id.0.raw()),
+        Some(serde_json::json!({ "name": name, "permissions": requested.bits().to_string() }).to_string()),
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(RoleView {
@@ -118,5 +123,10 @@ async fn assign_role<S: Store + 'static>(
         return Err(ApiError::BadRequest("target user is not a member".into()));
     }
     st.store.assign_role(realm, target, role).await?;
+    crate::routes::audit::record(
+        &st, realm, actor, domain::audit::AuditAction::MemberRoleUpdate, Some(target.0.raw()),
+        Some(serde_json::json!({ "role_id": role.0.raw().to_string() }).to_string()),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }

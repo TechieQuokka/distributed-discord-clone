@@ -138,6 +138,14 @@ entity_id!(
     /// refresh 토큰 id
     RefreshTokenId
 );
+entity_id!(
+    /// 첨부 id (D37)
+    AttachmentId
+);
+entity_id!(
+    /// 웹훅 id
+    WebhookId
+);
 
 #[cfg(test)]
 mod tests {

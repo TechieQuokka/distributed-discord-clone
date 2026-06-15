@@ -228,11 +228,76 @@ pub struct RoleView {
     pub position: i32,
 }
 
-pub async fn create_channel(base: &str, token: &str, guild: &str, name: &str) -> Result<ChannelView, String> {
+#[derive(Serialize)]
+struct CreateChannelBody<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'a str>,
+}
+
+/// 채널 생성 (kind 지정 가능: text/voice/category/announcement/forum).
+pub async fn create_channel_kind(base: &str, token: &str, guild: &str, name: &str, kind: Option<&str>) -> Result<ChannelView, String> {
     let res = client()
         .post(format!("{base}/guilds/{guild}/channels"))
         .bearer_auth(token)
-        .json(&NameBody { name })
+        .json(&CreateChannelBody { name, kind })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Deserialize)]
+pub struct ThreadView {
+    pub id: String,
+    pub parent_id: String,
+    pub name: Option<String>,
+    pub owner_id: Option<String>,
+    pub archived: bool,
+    pub message_count: i64,
+}
+
+#[derive(Serialize)]
+struct CreateThreadBody<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_archive: Option<i32>,
+}
+
+/// 부모 채널 아래 스레드 생성.
+pub async fn create_thread(base: &str, token: &str, channel: &str, name: &str, auto_archive: Option<i32>) -> Result<ThreadView, String> {
+    let res = client()
+        .post(format!("{base}/channels/{channel}/threads"))
+        .bearer_auth(token)
+        .json(&CreateThreadBody { name, auto_archive })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 부모 채널의 스레드 목록.
+pub async fn list_threads(base: &str, token: &str, channel: &str) -> Result<Vec<ThreadView>, String> {
+    let res = client()
+        .get(format!("{base}/channels/{channel}/threads"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Serialize)]
+struct ArchiveBody {
+    archived: bool,
+}
+
+/// 스레드 아카이브/해제 (소유자 또는 MANAGE_THREADS).
+pub async fn archive_thread(base: &str, token: &str, thread: &str, archived: bool) -> Result<ThreadView, String> {
+    let res = client()
+        .patch(format!("{base}/channels/{thread}/thread"))
+        .bearer_auth(token)
+        .json(&ArchiveBody { archived })
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -592,6 +657,153 @@ pub async fn list_read_states(base: &str, token: &str) -> Result<Vec<ReadStateVi
         .await
         .map_err(|e| e.to_string())?;
     ok_json(res).await
+}
+
+/// 길드 전문검색 (Q10, FTS). VIEW_CHANNEL 있는 채널만 결과에 포함.
+pub async fn search_messages(
+    base: &str,
+    token: &str,
+    guild: &str,
+    content: &str,
+    limit: Option<i64>,
+) -> Result<Vec<MessageView>, String> {
+    let mut url = format!("{base}/guilds/{guild}/messages/search?content={}", urlencoding::encode(content));
+    if let Some(l) = limit {
+        url.push_str(&format!("&limit={l}"));
+    }
+    let res = client().get(url).bearer_auth(token).send().await.map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Deserialize)]
+pub struct AttachmentView {
+    pub id: String,
+    pub filename: String,
+    pub size_bytes: i64,
+    pub url: String,
+}
+
+/// 메시지에 파일 첨부 (멀티파트 업로드, 작성자 본인).
+pub async fn upload_attachment(base: &str, token: &str, channel: &str, message: &str, path: &str) -> Result<AttachmentView, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_owned();
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let res = client()
+        .post(format!("{base}/channels/{channel}/messages/{message}/attachments"))
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 메시지의 첨부 목록.
+pub async fn list_attachments(base: &str, token: &str, channel: &str, message: &str) -> Result<Vec<AttachmentView>, String> {
+    let res = client()
+        .get(format!("{base}/channels/{channel}/messages/{message}/attachments"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 첨부 다운로드 → 로컬 파일로 저장.
+pub async fn download_attachment(base: &str, token: &str, attachment: &str, out: &str) -> Result<usize, String> {
+    let res = client()
+        .get(format!("{base}/attachments/{attachment}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("{status}: {}", res.text().await.unwrap_or_default()));
+    }
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    std::fs::write(out, &bytes).map_err(|e| format!("write {out}: {e}"))?;
+    Ok(bytes.len())
+}
+
+#[derive(Deserialize)]
+pub struct AuditEntryView {
+    pub id: String,
+    pub actor_id: Option<String>,
+    pub action_type: i16,
+    pub target_id: Option<String>,
+}
+
+/// 길드 감사 로그 조회 (VIEW_AUDIT_LOG).
+pub async fn list_audit(base: &str, token: &str, guild: &str, limit: Option<i64>) -> Result<Vec<AuditEntryView>, String> {
+    let mut url = format!("{base}/guilds/{guild}/audit-logs");
+    if let Some(l) = limit {
+        url.push_str(&format!("?limit={l}"));
+    }
+    let res = client().get(url).bearer_auth(token).send().await.map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+#[derive(Deserialize)]
+pub struct WebhookView {
+    pub id: String,
+    pub name: String,
+    pub token: Option<String>,
+}
+
+/// 웹훅 생성 (MANAGE_WEBHOOKS) → 토큰 1회 반환.
+pub async fn create_webhook(base: &str, token: &str, channel: &str, name: &str) -> Result<WebhookView, String> {
+    let res = client()
+        .post(format!("{base}/channels/{channel}/webhooks"))
+        .bearer_auth(token)
+        .json(&NameBody { name })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 채널 웹훅 목록.
+pub async fn list_webhooks(base: &str, token: &str, channel: &str) -> Result<Vec<WebhookView>, String> {
+    let res = client()
+        .get(format!("{base}/channels/{channel}/webhooks"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// 웹훅 삭제 (MANAGE_WEBHOOKS).
+pub async fn delete_webhook(base: &str, token: &str, webhook: &str) -> Result<(), String> {
+    let res = client()
+        .delete(format!("{base}/webhooks/{webhook}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+#[derive(Serialize)]
+struct ExecuteWebhookBody<'a> {
+    content: &'a str,
+}
+
+/// 웹훅 실행 (Bearer 없음 — URL 토큰). 채널에 메시지 게시.
+pub async fn execute_webhook(base: &str, webhook: &str, wh_token: &str, content: &str) -> Result<(), String> {
+    let res = client()
+        .post(format!("{base}/webhooks/{webhook}/{wh_token}"))
+        .json(&ExecuteWebhookBody { content })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
 }
 
 #[derive(Serialize)]

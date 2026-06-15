@@ -84,15 +84,21 @@
 
 ## Phase 4 — 살붙이기
 
-- [ ] 스레드 / 포럼 채널
-- [ ] 웹훅
-- [ ] 감사 로그 (audit_log)
-- [ ] 검색 — Postgres FTS (Q10)
-- [ ] 파일 첨부 — 로컬 FS (D37)
+- [x] 스레드 / 포럼 채널  # 스레드=channels(kind=thread,parent_id)+thread_meta(V13), 메시징/팬아웃/권한 길드 경로 재사용(P4, D44). forum=kind. POST/GET /channels/:id/threads + PATCH .../thread(아카이브). THREAD_CREATE/_UPDATE. 라이브 e2e
+
+- [x] 웹훅  # webhooks(V15) 토큰(opaque+SHA-256 해시, auth 재사용). POST/GET /channels/:cid/webhooks + DELETE /webhooks/:id + 실행 POST /webhooks/:id/:token(Bearer 없음, persist+MESSAGE_CREATE 액터 우회). 라이브 e2e
+
+- [x] 감사 로그 (audit_log)  # audit_log_entries(V16) + AuditRepository, 채널/역할/멤버/웹훅 mutation 기록(best-effort) + GET /guilds/:id/audit-logs(VIEW_AUDIT_LOG, 최신순 커서). 라이브 e2e
+
+- [x] 검색 — Postgres FTS (Q10)  # messages content_tsv(STORED)+GIN(V12), websearch_to_tsquery, GET /guilds/:id/messages/search(VIEW_CHANNEL 채널 필터). 라이브 e2e
+
+- [x] 파일 첨부 — 로컬 FS (D37)  # attachments(V14) 메타 + BlobStore 포트(LocalFsBlobStore 바이트). 사후 첨부 POST/GET /channels/:cid/messages/:mid/attachments + GET /attachments/:id. 라이브 e2e(업로드→다운로드 바이트 일치)
+
 - [x] TOTP MFA (D19)  # auth::totp(totp-rs) + enable/verify/disable + login 2단계, 라이브 e2e. 백업코드·WebAuthn은 Phase 5
 - [x] PoW 봇방지 정식 (D18)  # stateless PASETO v4.local 챌린지 + sha256 선행0비트, cli scenario e2e. 로그인 PoW는 후속
 - [x] Rate limit — Token Bucket per-node (D32)  # rest-api::ratelimit 미들웨어, 429+X-RateLimit 헤더, 라이브 검증. 메시지/WS·유저해시 승격은 후속
-- [ ] **메시지 시간 RANGE 파티셔닝** 전환 (D28, 04 문서)
+- [x] **메시지 시간 RANGE 파티셔닝** 전환 (D28, 04 문서)  # messages PARTITION BY RANGE(id) 월별+DEFAULT(V17). nonce 멱등(D34)은 앱레벨 dedup으로 이전(파티션 유니크 제약). 첨부 FK 유지(PG12+). 파티션 라우팅+nonce dedup 라이브 검증
+
 
 ---
 
@@ -111,5 +117,5 @@
 
 - [ ] Q7. 액터 supervisor/재시작 전략 (Phase 2)
 - [x] Q9. CLI 시나리오 스크립트 포맷 (Phase 1) — `scenario` 서브커맨드로 해결
-- [ ] Q10. 검색 구현 세부 (Phase 4, Postgres FTS 유력)
+- [x] Q10. 검색 구현 세부 (Phase 4) — Postgres FTS(tsvector 생성컬럼+GIN, websearch_to_tsquery), 길드 검색 + 채널 권한 필터로 해결
 - [ ] Q11. gossip discovery + 전역 presence (Phase 3/5)

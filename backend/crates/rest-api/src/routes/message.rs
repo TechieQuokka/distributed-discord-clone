@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, put};
-use domain::id::{ChannelId, MessageId, Snowflake};
+use domain::id::{ChannelId, MessageId, RealmId, Snowflake};
 use domain::permissions::Permissions;
 use domain::repo::Store;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use crate::state::AppState;
 pub fn routes<S: Store + 'static>() -> axum::Router<AppState<S>> {
     axum::Router::new()
         .route("/channels/{channel_id}/messages", get(list_messages::<S>))
+        .route("/guilds/{guild_id}/messages/search", get(search_messages::<S>))
         .route(
             "/channels/{channel_id}/messages/{message_id}",
             axum::routing::patch(edit_message::<S>).delete(delete_message::<S>),
@@ -85,6 +86,55 @@ async fn list_messages<S: Store + 'static>(
     let limit = q.limit.unwrap_or(50);
 
     let msgs = st.store.list_by_channel(channel_id, before, limit).await?;
+    Ok(Json(
+        msgs.into_iter()
+            .map(|m| MessageView {
+                id: m.id.0.raw().to_string(),
+                channel_id: m.channel_id.0.raw().to_string(),
+                author_id: m.author_id.0.raw().to_string(),
+                content: m.content,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    /// websearch 구문 (따옴표/OR/- 지원). Postgres `websearch_to_tsquery`가 안전 파싱.
+    pub content: String,
+    pub limit: Option<i64>,
+}
+
+/// 길드 전문검색 (Q10, FTS). 멤버여야 하고, 결과는 **VIEW_CHANNEL 있는 채널**로 한정한다
+/// (채널별 권한 존중, D17). 검색 자체는 storage FTS(GIN), 권한 필터는 여기서 적용.
+async fn search_messages<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path(guild_id): Path<String>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<Vec<MessageView>>, ApiError> {
+    let realm = guild_id
+        .parse::<u64>()
+        .map(|n| RealmId(Snowflake::from_raw(n)))
+        .map_err(|_| ApiError::BadRequest("invalid guild id".into()))?;
+    let query = q.content.trim();
+    if query.is_empty() {
+        return Err(ApiError::BadRequest("empty search query".into()));
+    }
+    if !st.store.is_member(realm, user).await? {
+        return Err(ApiError::Forbidden);
+    }
+
+    // VIEW_CHANNEL 있는 채널만 검색 대상 — 채널별 권한 존중(오버라이드 포함).
+    let mut allowed = Vec::new();
+    for ch in st.store.list_by_realm(realm).await? {
+        let perms = crate::perm::effective_in_channel(&*st.store, ch.id, realm, user).await?;
+        if perms.contains(Permissions::VIEW_CHANNEL) {
+            allowed.push(ch.id);
+        }
+    }
+
+    let msgs = st.store.search_messages(realm, &allowed, query, q.limit.unwrap_or(25)).await?;
     Ok(Json(
         msgs.into_iter()
             .map(|m| MessageView {

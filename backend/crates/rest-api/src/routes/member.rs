@@ -121,6 +121,11 @@ async fn patch_member<S: Store + 'static>(
         let payload = member_upsert_payload(realm, &u, Some(&member));
         let _ = st.emitter.emit(realm, "GUILD_MEMBER_UPDATE".into(), payload).await;
     }
+    crate::routes::audit::record(
+        &st, realm, actor, domain::audit::AuditAction::MemberNickUpdate, Some(target.0.raw()),
+        Some(serde_json::json!({ "nick": nick }).to_string()),
+    )
+    .await;
     Ok(Json(member.into()))
 }
 
@@ -152,5 +157,12 @@ async fn remove_member<S: Store + 'static>(
     }
     let payload = member_remove_payload(realm, target);
     let _ = st.emitter.emit(realm, "GUILD_MEMBER_REMOVE".into(), payload).await;
+    // 추방(타인)만 감사 기록 — 본인 탈퇴는 제외.
+    if target != actor {
+        crate::routes::audit::record(
+            &st, realm, actor, domain::audit::AuditAction::MemberKick, Some(target.0.raw()), None,
+        )
+        .await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }

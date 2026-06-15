@@ -31,26 +31,27 @@ fn row_to_message(r: &sqlx::postgres::PgRow) -> Message {
 
 impl MessageRepository for PgStore {
     async fn create_message(&self, m: &NewMessage) -> Result<bool, RepoError> {
-        // nonce 있을 때만 충돌 가능(부분 유니크). RETURNING id 행이 있으면 신규 삽입.
-        let q = if m.nonce.is_some() {
+        // 앱레벨 nonce dedup (D34, 파티셔닝 D28 후): 파티션 테이블은 부분 유니크 인덱스 불가
+        // (유니크는 파티션 키 id 포함 강제) → 가드 INSERT로 dedup. nonce 있을 때만 동일
+        // (channel,author,nonce) 부재 시 삽입, NULL이면 항상 삽입. dispatch가 단일 직렬 소비자라 레이스 없음.
+        let inserted = sqlx::query(
             "INSERT INTO messages (id, channel_id, realm_id, author_id, content, nonce, reference_message_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             ON CONFLICT (channel_id, author_id, nonce) WHERE nonce IS NOT NULL DO NOTHING RETURNING id"
-        } else {
-            "INSERT INTO messages (id, channel_id, realm_id, author_id, content, nonce, reference_message_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"
-        };
-        let inserted = sqlx::query(q)
-            .bind(m.id.0.raw() as i64)
-            .bind(m.channel_id.0.raw() as i64)
-            .bind(m.realm_id.0.raw() as i64)
-            .bind(m.author_id.0.raw() as i64)
-            .bind(&m.content)
-            .bind(&m.nonce)
-            .bind(m.reference_message_id.map(|r| r.0.raw() as i64))
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_err)?;
+             SELECT $1, $2, $3, $4, $5, $6, $7 \
+             WHERE $6::text IS NULL OR NOT EXISTS ( \
+                 SELECT 1 FROM messages WHERE channel_id = $2 AND author_id = $4 AND nonce = $6 \
+             ) \
+             RETURNING id",
+        )
+        .bind(m.id.0.raw() as i64)
+        .bind(m.channel_id.0.raw() as i64)
+        .bind(m.realm_id.0.raw() as i64)
+        .bind(m.author_id.0.raw() as i64)
+        .bind(&m.content)
+        .bind(&m.nonce)
+        .bind(m.reference_message_id.map(|r| r.0.raw() as i64))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_err)?;
         Ok(inserted.is_some())
     }
 
@@ -136,6 +137,35 @@ impl MessageRepository for PgStore {
         .await
         .map_err(map_err)?;
         Ok(())
+    }
+
+    async fn search_messages(
+        &self,
+        realm: RealmId,
+        channels: &[ChannelId],
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, RepoError> {
+        if channels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chans: Vec<i64> = channels.iter().map(|c| c.0.raw() as i64).collect();
+        // websearch_to_tsquery: 사용자 입력을 안전하게 파싱(따옴표/OR/- 지원, 파서 에러 없음).
+        // GIN 인덱스(ix_messages_fts)가 content_tsv @@ 매칭을 가속.
+        let rows = sqlx::query(
+            "SELECT id, channel_id, realm_id, author_id, content, nonce, reference_message_id FROM messages \
+             WHERE realm_id = $1 AND channel_id = ANY($2) AND deleted_at IS NULL \
+               AND content_tsv @@ websearch_to_tsquery('simple', $3) \
+             ORDER BY id DESC LIMIT $4",
+        )
+        .bind(realm.0.raw() as i64)
+        .bind(&chans)
+        .bind(query)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.iter().map(row_to_message).collect())
     }
 }
 
@@ -251,6 +281,74 @@ mod edit_react_tests {
         sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(chan.0.raw() as i64).execute(&pool).await.unwrap();
         sqlx::query("DELETE FROM realms WHERE id = $1").bind(realm.0.raw() as i64).execute(&pool).await.unwrap();
         sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(vec![owner.0.raw() as i64, other.0.raw() as i64]).execute(&pool).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use domain::channel::{ChannelKind, NewChannel};
+    use domain::guild::NewGuild;
+    use domain::repo::{ChannelRepository, GuildRepository, UserRepository};
+    use domain::user::NewUser;
+
+    /// 실제 Postgres 필요 — skip if no DATABASE_URL. FTS 검색(매칭/제외/채널필터/삭제제외) 종단.
+    #[tokio::test]
+    async fn fts_search_messages() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL 미설정 — search 테스트 skip");
+            return;
+        };
+        let pool = crate::connect(&url).await.expect("connect");
+        crate::run_migrations(&pool).await.expect("migrate");
+        let s = PgStore::new(pool.clone());
+
+        let owner = UserId(Snowflake::from_raw(730_001));
+        let realm = RealmId(Snowflake::from_raw(730_002));
+        let chan = ChannelId(Snowflake::from_raw(730_003));
+        let other_chan = ChannelId(Snowflake::from_raw(730_004));
+        for c in [chan, other_chan] {
+            sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(c.0.raw() as i64).execute(&pool).await.unwrap();
+        }
+        sqlx::query("DELETE FROM realms WHERE id = $1").bind(realm.0.raw() as i64).execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(owner.0.raw() as i64).execute(&pool).await.unwrap();
+
+        s.create_user(&NewUser { id: owner, username: "se_owner".into(), email: "se@e.com".into(), password_hash: "x".into() }).await.unwrap();
+        s.create_guild(&NewGuild { realm_id: realm, name: "G".into(), owner_id: owner }).await.unwrap();
+        s.create_channel(&NewChannel { id: chan, realm_id: realm, kind: ChannelKind::Text, name: "general".into() }).await.unwrap();
+        s.create_channel(&NewChannel { id: other_chan, realm_id: realm, kind: ChannelKind::Text, name: "off".into() }).await.unwrap();
+
+        let mk = |id: u64, c: ChannelId, body: &str| NewMessage {
+            id: MessageId(Snowflake::from_raw(id)), channel_id: c, realm_id: realm, author_id: owner,
+            content: body.into(), nonce: None, reference_message_id: None,
+        };
+        s.create_message(&mk(730_010, chan, "the quick brown fox")).await.unwrap();
+        s.create_message(&mk(730_011, chan, "lazy dog sleeps")).await.unwrap();
+        s.create_message(&mk(730_012, other_chan, "fox in other channel")).await.unwrap();
+        let deleted = mk(730_013, chan, "fox deleted message");
+        s.create_message(&deleted).await.unwrap();
+        s.soft_delete_message(deleted.id).await.unwrap();
+
+        // "fox" → chan + other_chan에 2건(삭제건 제외).
+        let hits = s.search_messages(realm, &[chan, other_chan], "fox", 25).await.unwrap();
+        assert_eq!(hits.len(), 2, "fox 매칭 2건(삭제 제외)");
+        assert!(hits.iter().all(|m| m.content.contains("fox")));
+
+        // 채널 필터: chan만 허용 → other_chan 결과 제외.
+        let only_chan = s.search_messages(realm, &[chan], "fox", 25).await.unwrap();
+        assert_eq!(only_chan.len(), 1);
+        assert_eq!(only_chan[0].channel_id, chan);
+
+        // 매칭 없음.
+        assert_eq!(s.search_messages(realm, &[chan, other_chan], "elephant", 25).await.unwrap().len(), 0);
+        // 빈 채널 목록 → 빈 결과.
+        assert_eq!(s.search_messages(realm, &[], "fox", 25).await.unwrap().len(), 0);
+
+        for c in [chan, other_chan] {
+            sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(c.0.raw() as i64).execute(&pool).await.unwrap();
+        }
+        sqlx::query("DELETE FROM realms WHERE id = $1").bind(realm.0.raw() as i64).execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(owner.0.raw() as i64).execute(&pool).await.unwrap();
     }
 }
 

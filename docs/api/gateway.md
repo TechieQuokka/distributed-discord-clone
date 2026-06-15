@@ -103,6 +103,7 @@ S ──RESUMED(s=현재 last seq)──▶ C
 | 이벤트 | 트리거 |
 |---|---|
 | `CHANNEL_CREATE` / `_UPDATE` / `_DELETE` | 채널 변경 |
+| `THREAD_CREATE` / `_UPDATE` | 스레드 생성/아카이브 (D44) |
 | `GUILD_CREATE` | 길드 입장/로드 |
 | `GUILD_UPDATE` / `_DELETE` | 길드 변경/삭제 |
 | `GUILD_MEMBER_ADD` / `_UPDATE` / `_REMOVE` | 멤버 변동 |
@@ -118,8 +119,9 @@ S ──RESUMED(s=현재 last seq)──▶ C
 
 > 이벤트 페이로드 `d`는 해당 엔티티의 JSON (스키마 [../database/02-schema.md](../database/02-schema.md) 대응).
 
-### 구현 현황 (Phase 3, D39~D43)
-- 구현된 DISPATCH: `MESSAGE_CREATE` / `MESSAGE_UPDATE` / `MESSAGE_DELETE`, `MESSAGE_REACTION_ADD` / `_REMOVE`, `MESSAGE_ACK`(읽음, D41), `GUILD_MEMBER_ADD` / `_UPDATE` / `_REMOVE`, `CHANNEL_RECIPIENT_ADD` / `_REMOVE`(그룹DM 참가자 변동, D8), `RELATIONSHIP_ADD` / `_REMOVE`(친구·차단, D40), `PRESENCE_UPDATE`(전역 presence, D42), `READY`/`RESUMED`.
+### 구현 현황 (Phase 3 D39~D43 + Phase 4 D44)
+- 구현된 DISPATCH: `MESSAGE_CREATE` / `MESSAGE_UPDATE` / `MESSAGE_DELETE`, `MESSAGE_REACTION_ADD` / `_REMOVE`, `MESSAGE_ACK`(읽음, D41), `GUILD_MEMBER_ADD` / `_UPDATE` / `_REMOVE`, `CHANNEL_RECIPIENT_ADD` / `_REMOVE`(그룹DM 참가자 변동, D8), `THREAD_CREATE` / `THREAD_UPDATE`(스레드, D44), `RELATIONSHIP_ADD` / `_REMOVE`(친구·차단, D40), `PRESENCE_UPDATE`(전역 presence, D42), `READY`/`RESUMED`.
+- **THREAD_CREATE/_UPDATE**(D44): 스레드 = 부모와 같은 Realm의 `channels`(kind='thread') 행이라 Realm 구독자표(D12)로 그대로 팬아웃. payload: `{ "id", "realm_id", "parent_id", "name", "owner_id", "archived", "auto_archive", "message_count" }`. 트리거: `POST /channels/:id/threads`(CREATE) · `PATCH /channels/:id/thread`(UPDATE=아카이브). 스레드 메시지는 별도 이벤트 없이 일반 `MESSAGE_CREATE`(채널=스레드 id).
 - **PRESENCE_UPDATE**(D42): 친구가 온/오프라인 전이하면 그 친구를 둔 노드가 배달. payload `{ "user": { "id": "..." }, "status": "online"|"offline" }`. 크로스노드는 `PRESENCE_GOSSIP`(node-wire 0x0201) 풀메시 broadcast로 전파 → 각 노드가 로컬 친구에게 배달. **READY 스냅샷에 `presences`**(현재 온라인인 친구 목록) 포함. (idle/dnd 설정용 C→S op 3은 후속.)
 - **READY 스냅샷에 `read_states` 포함**(D41): `[{ "channel_id", "last_read_message_id"|null, "mention_count" }]`. `MESSAGE_ACK`(유저 emit, 본인 다른 기기 동기화) payload: `{ "channel_id", "message_id", "mention_count" }`.
 - **이벤트 emit 경로 2종**: ① Realm 단위(구독자표 D12, `RealmEmitter`) — 메시지/멤버/recipient. ② **유저 단위**(`UserEmitter`, D40) — 친구·차단·읽음 등 Realm 무관 이벤트. **D43부터 크로스노드**: 로컬 세션은 `Hub`로, 다른 노드에 접속한 대상 유저는 `Presence` 디렉터리(D42)로 호스팅 노드를 찾아 `USER_DELIVER`(node-wire 0x0202)로 타깃 배달. (포트 시그니처 불변 → REST 라우트 무변경.)
