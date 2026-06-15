@@ -8,7 +8,7 @@
 
 1. **`CLAUDE.md`** — 개발 규칙 R1~R7 + 핵심 원칙 P1~P6. **필수.**
 2. `docs/README.md` — 문서 인덱스
-3. `docs/architecture/decisions.md` — 결정 원장 D1~D39(+ 정제 갱신, Q1~Q11) (왜 이렇게 만들었나 = source of truth)
+3. `docs/architecture/decisions.md` — 결정 원장 D1~D42(+ 정제 갱신, Q1~Q11) (왜 이렇게 만들었나 = source of truth)
 4. `TODO.md` — 진행 상태 (`[x]` 완료 / `[~]` 진행중 / `[ ]` 미착수)
 5. `CHANGELOG.md` — 최근 한 일 (최상단이 최신)
 
@@ -65,7 +65,7 @@ cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2F
 **Phase 3 — Discord 본체 완료.** 초대 + 역할/권한 + 채널 오버라이드(D17) + 멤버 관리 + 메시지 편집·삭제·리액션·답장·멘션(D39) + DM/그룹DM(D8) + 친구·차단(D40) + 읽음 상태(D41) + 전역 presence(D42) **전부 완료**. 다음 후보:
 
 1. **Phase 4 진입(살붙이기)** — 스레드/포럼·웹훅·감사로그·검색(Postgres FTS, Q10)·파일첨부(D37)·TOTP MFA(D19)·PoW 봇방지(D18)·rate limit(D32)·**메시지 시간 RANGE 파티셔닝**(D28). 인증/봇방지(PoW·TOTP·rate limit)를 한 묶음으로, 또는 스레드/검색을 먼저.
-2. **정리/하드닝** — 누적된 1.22~1.28 변경분 커밋, 크로스노드 RESUME(버퍼 노드 로컬), D35 Realm 캐시 warmup, presence anti-entropy(신규 노드 join 동기화)·idle/dnd op(3) 등 seam 회수.
+2. **하드닝/seam 회수** — (v1.28까지 전부 커밋·push 완료) 크로스노드 RESUME(버퍼 노드 로컬), D35 Realm 캐시 warmup, presence anti-entropy(신규 노드 join 동기화)·idle/dnd op(3), D40/D41을 gossip으로 일반화(크로스노드 RELATIONSHIP_*/MESSAGE_ACK) 등.
 3. **frontend 착수** — R4상 backend·API·CLI가 사실상 일단락 → web UI(React+TS+Vite, D30) 시작 가능.
 
 > D42 presence: 전역 presence가 gossip(풀메시 broadcast + 로컬 친구 필터) 경로를 확립 → **크로스노드 유저 라우팅이 가능해짐**. 단 현재 그 경로를 타는 건 `PRESENCE_UPDATE`뿐. **D40 `RELATIONSHIP_*`/D41 `MESSAGE_ACK`는 아직 `UserEmitter`(로컬 노드)만** — 같은 gossip 메커니즘으로 일반화하면 크로스노드 배달됨(후속 seam). presence 자체 seam: 신규 노드 join 시 과거 presence 동기화(anti-entropy) 없음 · idle/dnd(op 3) · 전 노드 재시작 시 휘발 리셋.

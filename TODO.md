@@ -13,7 +13,7 @@
 
 ## 📄 문서화 (Docs) — 진행중
 
-- [x] 아키텍처 결정 원장 (decisions.md, D1~D39)
+- [x] 아키텍처 결정 원장 (decisions.md, D1~D42)
 - [x] DB 설계 문서군 (overview / schema / erd / partitioning)
 - [x] 설계 토론 기록 (design-discussion.md)
 - [x] 문서 인덱스 (docs/README.md)

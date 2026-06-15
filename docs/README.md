@@ -9,7 +9,7 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 
 | 순서 | 문서 | 내용 |
 |---|---|---|
-| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D39)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
+| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D42)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
 | - | [design-discussion.md](design-discussion.md) | **설계 토론 기록** — 어떤 선택지를 두고 어떻게 논쟁해 정했나 (서사) |
 | 2 | [database/01-overview.md](database/01-overview.md) | DB 철학·규약·핵심 모델링 결정 |
 | 3 | [database/02-schema.md](database/02-schema.md) | 전체 테이블 DDL (도메인별) |
