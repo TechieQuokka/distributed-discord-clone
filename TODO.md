@@ -1,7 +1,7 @@
 # TODO
 
 > 분산 Discord 클론 — 작업 추적. 설계 출처: [docs/architecture/decisions.md](docs/architecture/decisions.md).
-> 현재 단계: **Phase 3 완료** + **Phase 4 진행** (v1.32.0, 인증/봇방지 묶음 PoW·rate limit·TOTP 완료) → 나머지 Phase 4(스레드/검색/첨부/파티셔닝/웹훅/감사로그). 로드맵 = D §4-R. 이어서 → RESUME.md.
+> 현재 단계: **Phase 4 완료** (v1.38.0 — 인증/봇방지 + 검색 Q10 + 스레드/포럼 D44 + 첨부 D37 + 웹훅 + 감사로그 + 메시지 RANGE 파티셔닝 D28). 다음: Phase 5 스트레치 또는 frontend(D30). 로드맵 = D §4-R. 이어서 → RESUME.md.
 
 범례: `[ ]` 미착수 · `[~]` 진행중 · `[x]` 완료
 
