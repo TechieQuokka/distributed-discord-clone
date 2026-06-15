@@ -84,6 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // per-node Rate limiter (D32, 휘발 DB-D5) — 노드마다 독립 버킷(분산 근사). 기본 규칙 적용.
     let ratelimit = Arc::new(rest_api::RateLimiter::with_defaults());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    // 첨부 바이트 저장소 (D37) — 로컬 FS. env ATTACHMENT_DIR(기본 ./attachments).
+    let attach_dir = std::env::var("ATTACHMENT_DIR").unwrap_or_else(|_| "./attachments".into());
+    let blobs: Arc<dyn domain::blob::BlobStore> = Arc::new(storage::LocalFsBlobStore::new(&attach_dir)?);
 
     // 분산 코어: 링(클러스터의 모든 노드) + raw-TCP+mTLS 전송(D3/D16).
     let mut ring = HashRing::new(128);
@@ -161,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&clock),
         Arc::clone(&router) as Arc<dyn domain::emit::RealmEmitter>,
         Arc::new(user_router) as Arc<dyn domain::emit::UserEmitter>,
+        Arc::clone(&blobs),
     ));
 
     // Gateway(WS + 메시지 전송) 라우터.

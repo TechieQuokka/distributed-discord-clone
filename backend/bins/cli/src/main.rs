@@ -34,8 +34,14 @@ enum Command {
     TotpCode(TotpCodeArgs),
     /// 길드 생성 (기본 'general' 채널 포함).
     CreateGuild(CreateGuildArgs),
-    /// 텍스트 채널 생성 (MANAGE_CHANNELS 필요).
+    /// 채널 생성 (MANAGE_CHANNELS 필요). --kind로 forum 등 지정 가능.
     CreateChannel(CreateChannelArgs),
+    /// 스레드 생성 (부모 채널 아래, CREATE_PUBLIC_THREADS).
+    CreateThread(CreateThreadArgs),
+    /// 부모 채널의 스레드 목록.
+    ListThreads(ListThreadsArgs),
+    /// 스레드 아카이브/해제 (소유자 또는 MANAGE_THREADS).
+    ArchiveThread(ArchiveThreadArgs),
     /// 역할 생성 (MANAGE_ROLES 필요). --permissions = raw u64 비트마스크.
     CreateRole(CreateRoleArgs),
     /// 멤버에게 역할 부여 (MANAGE_ROLES 필요).
@@ -74,6 +80,8 @@ enum Command {
     Ack(AckArgs),
     /// 내 읽음 상태 목록 (채널별 last_read + 안 읽은 멘션 수).
     ReadStates(TokenArgs),
+    /// 길드 메시지 전문검색 (Postgres FTS, Q10). VIEW_CHANNEL 채널만.
+    Search(SearchArgs),
     /// 채널에 메시지 전송 (REST → gateway로 팬아웃).
     Send(SendArgs),
     /// 메시지 편집 (작성자 본인) → MESSAGE_UPDATE.
@@ -84,6 +92,22 @@ enum Command {
     React(ReactArgs),
     /// 메시지 리액션 제거 (본인) → MESSAGE_REACTION_REMOVE.
     Unreact(ReactArgs),
+    /// 메시지에 파일 첨부 (작성자 본인, 멀티파트 업로드).
+    UploadAttachment(UploadAttachmentArgs),
+    /// 메시지의 첨부 목록.
+    Attachments(AttachmentsArgs),
+    /// 첨부 다운로드 → 로컬 파일 저장.
+    DownloadAttachment(DownloadAttachmentArgs),
+    /// 웹훅 생성 (MANAGE_WEBHOOKS) → 실행 토큰 1회 반환.
+    CreateWebhook(CreateWebhookArgs),
+    /// 채널 웹훅 목록 (MANAGE_WEBHOOKS).
+    ListWebhooks(ListWebhooksArgs),
+    /// 웹훅 실행 (URL 토큰으로 채널에 메시지 게시).
+    ExecuteWebhook(ExecuteWebhookArgs),
+    /// 웹훅 삭제 (MANAGE_WEBHOOKS).
+    DeleteWebhook(DeleteWebhookArgs),
+    /// 길드 감사 로그 조회 (VIEW_AUDIT_LOG).
+    AuditLogs(AuditLogsArgs),
     /// Gateway(WS) 연결 → 이벤트 구독·출력.
     Listen(ListenArgs),
     /// 헤드리스 종단 시나리오 자동 검증 (D1).
@@ -151,6 +175,41 @@ struct CreateChannelArgs {
     guild: String,
     #[arg(long)]
     name: String,
+    /// 채널 종류 (text/voice/category/announcement/forum). 생략 시 text.
+    #[arg(long)]
+    kind: Option<String>,
+}
+#[derive(Args)]
+struct CreateThreadArgs {
+    #[arg(long)]
+    token: String,
+    /// 부모 채널 id.
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    name: String,
+    /// 자동 아카이브(분).
+    #[arg(long)]
+    auto_archive: Option<i32>,
+}
+#[derive(Args)]
+struct ListThreadsArgs {
+    #[arg(long)]
+    token: String,
+    /// 부모 채널 id.
+    #[arg(long)]
+    channel: String,
+}
+#[derive(Args)]
+struct ArchiveThreadArgs {
+    #[arg(long)]
+    token: String,
+    /// 스레드 채널 id.
+    #[arg(long)]
+    thread: String,
+    /// true=아카이브, false=해제.
+    #[arg(long, action = clap::ArgAction::Set)]
+    archived: bool,
 }
 #[derive(Args)]
 struct CreateRoleArgs {
@@ -301,6 +360,18 @@ struct AckArgs {
     message: String,
 }
 #[derive(Args)]
+struct SearchArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    /// 검색어 (websearch 구문: 따옴표/OR/- 지원).
+    #[arg(long)]
+    content: String,
+    #[arg(long)]
+    limit: Option<i64>,
+}
+#[derive(Args)]
 struct SendArgs {
     #[arg(long)]
     token: String,
@@ -345,6 +416,81 @@ struct ReactArgs {
     /// 유니코드 이모지 (예: 👍).
     #[arg(long)]
     emoji: String,
+}
+#[derive(Args)]
+struct UploadAttachmentArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+    /// 업로드할 로컬 파일 경로.
+    #[arg(long)]
+    file: String,
+}
+#[derive(Args)]
+struct AttachmentsArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    message: String,
+}
+#[derive(Args)]
+struct DownloadAttachmentArgs {
+    #[arg(long)]
+    token: String,
+    /// 첨부 id.
+    #[arg(long)]
+    attachment: String,
+    /// 저장할 로컬 경로.
+    #[arg(long)]
+    out: String,
+}
+#[derive(Args)]
+struct CreateWebhookArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    name: String,
+}
+#[derive(Args)]
+struct ListWebhooksArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    channel: String,
+}
+#[derive(Args)]
+struct ExecuteWebhookArgs {
+    /// 웹훅 id.
+    #[arg(long)]
+    webhook: String,
+    /// 웹훅 토큰 (create 시 1회 반환).
+    #[arg(long)]
+    webhook_token: String,
+    #[arg(long)]
+    content: String,
+}
+#[derive(Args)]
+struct DeleteWebhookArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    webhook: String,
+}
+#[derive(Args)]
+struct AuditLogsArgs {
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    guild: String,
+    #[arg(long)]
+    limit: Option<i64>,
 }
 #[derive(Args)]
 struct ListenArgs {
@@ -416,8 +562,20 @@ async fn main() -> std::process::ExitCode {
                 println!("  channel  = {} ({})", c.id, c.name.clone().unwrap_or_default());
             }
         }),
-        Command::CreateChannel(a) => rest::create_channel(&base, &a.token, &a.guild, &a.name).await.map(|c| {
-            println!("✅ channel created: {} ({})", c.id, c.name.clone().unwrap_or_default());
+        Command::CreateChannel(a) => rest::create_channel_kind(&base, &a.token, &a.guild, &a.name, a.kind.as_deref()).await.map(|c| {
+            println!("✅ channel created: {} ({}) kind={}", c.id, c.name.clone().unwrap_or_default(), c.kind);
+        }),
+        Command::CreateThread(a) => rest::create_thread(&base, &a.token, &a.channel, &a.name, a.auto_archive).await.map(|t| {
+            println!("✅ thread created: {} ({}) parent={} owner={:?}", t.id, t.name.clone().unwrap_or_default(), t.parent_id, t.owner_id);
+        }),
+        Command::ListThreads(a) => rest::list_threads(&base, &a.token, &a.channel).await.map(|ts| {
+            println!("✅ {} thread(s)", ts.len());
+            for t in &ts {
+                println!("  [{}] {} archived={} msgs={}", t.id, t.name.clone().unwrap_or_default(), t.archived, t.message_count);
+            }
+        }),
+        Command::ArchiveThread(a) => rest::archive_thread(&base, &a.token, &a.thread, a.archived).await.map(|t| {
+            println!("✅ thread {} archived={}", t.id, t.archived);
         }),
         Command::CreateRole(a) => rest::create_role(&base, &a.token, &a.guild, &a.name, a.permissions).await.map(|r| {
             println!("✅ role created: {} ({}) perms={}", r.id, r.name, r.permissions);
@@ -498,6 +656,12 @@ async fn main() -> std::process::ExitCode {
                 println!("  channel {} last_read={} mentions={}", s.channel_id, lr, s.mention_count);
             }
         }),
+        Command::Search(a) => rest::search_messages(&base, &a.token, &a.guild, &a.content, a.limit).await.map(|ms| {
+            println!("✅ {} match(es)", ms.len());
+            for m in &ms {
+                println!("  [{}] ch={} {}", m.id, m.channel_id, m.content);
+            }
+        }),
         Command::Send(a) => rest::send_message(&base, &a.token, &a.channel, &a.content, a.nonce.clone(), a.reply.clone())
             .await
             .map(|_| println!("✅ queued (will arrive via gateway MESSAGE_CREATE)")),
@@ -513,6 +677,41 @@ async fn main() -> std::process::ExitCode {
         Command::Unreact(a) => rest::remove_reaction(&base, &a.token, &a.channel, &a.message, &a.emoji)
             .await
             .map(|_| println!("✅ unreacted {} from {}", a.emoji, a.message)),
+        Command::UploadAttachment(a) => rest::upload_attachment(&base, &a.token, &a.channel, &a.message, &a.file)
+            .await
+            .map(|at| println!("✅ uploaded {} ({} bytes) → {}", at.filename, at.size_bytes, at.url)),
+        Command::Attachments(a) => rest::list_attachments(&base, &a.token, &a.channel, &a.message).await.map(|ats| {
+            println!("✅ {} attachment(s)", ats.len());
+            for at in &ats {
+                println!("  [{}] {} ({} bytes) {}", at.id, at.filename, at.size_bytes, at.url);
+            }
+        }),
+        Command::DownloadAttachment(a) => rest::download_attachment(&base, &a.token, &a.attachment, &a.out)
+            .await
+            .map(|n| println!("✅ downloaded {} bytes → {}", n, a.out)),
+        Command::CreateWebhook(a) => rest::create_webhook(&base, &a.token, &a.channel, &a.name).await.map(|w| {
+            println!("✅ webhook created: {} ({})", w.id, w.name);
+            println!("  token = {}  (1회 반환 — 보관 필수)", w.token.unwrap_or_default());
+            println!("  execute: POST /webhooks/{}/<token>", w.id);
+        }),
+        Command::ListWebhooks(a) => rest::list_webhooks(&base, &a.token, &a.channel).await.map(|ws| {
+            println!("✅ {} webhook(s)", ws.len());
+            for w in &ws {
+                println!("  [{}] {}", w.id, w.name);
+            }
+        }),
+        Command::ExecuteWebhook(a) => rest::execute_webhook(&base, &a.webhook, &a.webhook_token, &a.content)
+            .await
+            .map(|_| println!("✅ webhook executed (MESSAGE_CREATE fanned out)")),
+        Command::DeleteWebhook(a) => rest::delete_webhook(&base, &a.token, &a.webhook)
+            .await
+            .map(|_| println!("✅ webhook {} deleted", a.webhook)),
+        Command::AuditLogs(a) => rest::list_audit(&base, &a.token, &a.guild, a.limit).await.map(|es| {
+            println!("✅ {} audit entr(ies)", es.len());
+            for e in &es {
+                println!("  [{}] action={} actor={:?} target={:?}", e.id, e.action_type, e.actor_id, e.target_id);
+            }
+        }),
         Command::Listen(a) => gateway_client::listen(&base, &a.token, a.seconds).await,
         Command::Scenario(a) => return scenario::run(&base, &a.password).await,
     };

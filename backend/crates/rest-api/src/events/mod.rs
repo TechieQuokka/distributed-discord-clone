@@ -7,8 +7,24 @@ use domain::id::{ChannelId, MessageId, RealmId, UserId};
 use domain::member::Member;
 use domain::message::Message;
 use domain::relationship::RelationKind;
+use domain::thread::Thread;
 use domain::user::User;
 use serde_json::json;
+
+/// `THREAD_CREATE` / `THREAD_UPDATE` 페이로드 (스레드 = 채널, 부모/소유자/아카이브 포함).
+pub fn thread_payload(t: &Thread) -> String {
+    json!({
+        "id": t.id.0.raw().to_string(),
+        "realm_id": t.realm_id.0.raw().to_string(),
+        "parent_id": t.parent_id.0.raw().to_string(),
+        "name": t.name,
+        "owner_id": t.owner_id.map(|o| o.0.raw().to_string()),
+        "archived": t.archived,
+        "auto_archive": t.auto_archive,
+        "message_count": t.message_count,
+    })
+    .to_string()
+}
 
 /// `GUILD_MEMBER_ADD` / `GUILD_MEMBER_UPDATE` 페이로드. `member`로 nick/roles 채움.
 pub fn member_upsert_payload(realm: RealmId, user: &User, member: Option<&Member>) -> String {
@@ -93,6 +109,28 @@ pub fn recipient_remove_payload(realm: RealmId, channel_id: ChannelId, user_id: 
         "realm_id": realm.0.raw().to_string(),
         "channel_id": channel_id.0.raw().to_string(),
         "user": { "id": user_id.0.raw().to_string() },
+    })
+    .to_string()
+}
+
+/// 웹훅이 게시한 `MESSAGE_CREATE` 페이로드 (gateway dispatch의 메시지 페이로드 모양과 동일 + `webhook_id`).
+/// rest-api가 persist 후 직접 emit하므로(액터 우회 seam) 여기서 1회 조립한다(D39 생산 엣지).
+pub fn webhook_message_payload(
+    message_id: MessageId,
+    channel_id: ChannelId,
+    author: UserId,
+    webhook_id: u64,
+    content: &str,
+) -> String {
+    json!({
+        "id": message_id.0.raw().to_string(),
+        "channel_id": channel_id.0.raw().to_string(),
+        "author": { "id": author.0.raw().to_string() },
+        "content": content,
+        "nonce": serde_json::Value::Null,
+        "reference_message_id": serde_json::Value::Null,
+        "mentions": [],
+        "webhook_id": webhook_id.to_string(),
     })
     .to_string()
 }

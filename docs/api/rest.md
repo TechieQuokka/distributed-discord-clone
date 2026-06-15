@@ -48,7 +48,9 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | POST | `/auth/mfa/totp/{enable,verify,disable}` | enable/verify/disable=인증 | TOTP 설정(D19): enable=secret+URI 발급 / verify=확인 후 저장(활성) / disable=코드 확인 후 제거 |
 | POST | `/auth/mfa/totp` | — | 로그인 2단계: `username`+`password`+`code` → 토큰 (D19) |
 | POST | `/guilds` | — | 길드 + @everyone 역할 + 기본 general 채널 |
-| POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | |
+| POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | `kind` 선택(text/voice/category/announcement/forum, D44) |
+| POST / GET | `/channels/{id}/threads` | 생성=CREATE_PUBLIC_THREADS / 목록=VIEW_CHANNEL | 스레드 생성·목록 (D44, 스레드=채널 P4). 생성 시 `THREAD_CREATE` 팬아웃 |
+| PATCH | `/channels/{id}/thread` | 소유자 또는 MANAGE_THREADS | 스레드 아카이브/해제 → `THREAD_UPDATE` 팬아웃 (D44) |
 | GET / POST | `/guilds/{id}/roles` | GET=멤버 / POST=MANAGE_ROLES (권한상승 방지) | |
 | GET | `/guilds/{id}/members` | 멤버 | 멤버 목록(nick/joined/역할) |
 | GET | `/guilds/{id}/members/{user_id}` | 멤버 | 멤버 단건 조회 |
@@ -67,10 +69,17 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | GET | `/users/@me/read-states` | (인증) | 내 읽음 상태 목록(채널별 last_read + mention_count). READY 스냅샷과 동일 |
 | PUT | `/channels/{id}/permissions/{target_id}` | MANAGE_ROLES | 오버라이드 upsert (DELETE는 후속) |
 | GET | `/channels/{id}/messages` | VIEW_CHANNEL + READ_MESSAGE_HISTORY | 히스토리 커서 (D38) |
+| GET | `/guilds/{id}/messages/search` | 멤버 (결과는 VIEW_CHANNEL 채널 한정) | 전문검색 `?content=&limit=` (Q10, Postgres FTS `websearch_to_tsquery`, V12 `content_tsv`+GIN) |
 | POST | `/channels/{id}/messages` | SEND_MESSAGES | **`gateway` crate가 서빙**(D31) — 채널 컨텍스트 권한 계산 후 persist-then-fanout (D24). `reference_message_id`(답장, 같은 채널 검증)·`<@id>` 멘션 파싱 지원 (D39, V8 `message_mentions`) |
 | PATCH | `/channels/{id}/messages/{mid}` | 작성자 본인 | 편집 → `edited_at` 갱신 + `MESSAGE_UPDATE` 팬아웃 (D39) |
 | DELETE | `/channels/{id}/messages/{mid}` | 작성자 본인 또는 MANAGE_MESSAGES | 소프트 삭제(`deleted_at`) + `MESSAGE_DELETE` 팬아웃 (D39) |
 | PUT/DELETE | `/channels/{id}/messages/{mid}/reactions/{emoji}/@me` | ADD_REACTIONS(추가) / 멤버(제거) | 본인 리액션 추가·제거 → `MESSAGE_REACTION_ADD/_REMOVE` 팬아웃 (D39, V7 `reactions`) |
+| POST / GET | `/channels/{id}/messages/{mid}/attachments` | 업로드=작성자+ATTACH_FILES / 목록=VIEW_CHANNEL | 파일 첨부 멀티파트 업로드·목록 (D37, V14 `attachments` + BlobStore 로컬 FS, 8 MiB) |
+| GET | `/attachments/{id}` | 채널 VIEW_CHANNEL | 첨부 다운로드 (바이트 + content-type, D37) |
+| POST / GET | `/channels/{id}/webhooks` | MANAGE_WEBHOOKS | 웹훅 생성(토큰 1회 반환)·목록 (V15) |
+| DELETE | `/webhooks/{id}` | MANAGE_WEBHOOKS | 웹훅 삭제 |
+| POST | `/webhooks/{id}/{token}` | URL 토큰 (Bearer 없음) | 웹훅 실행 = 채널에 메시지 게시 → `MESSAGE_CREATE` (액터 우회 seam) |
+| GET | `/guilds/{id}/audit-logs` | VIEW_AUDIT_LOG | 감사 로그 `?before=&limit=` (V16, 채널/역할/멤버/웹훅 변경 기록) |
 
 > 권한 계산은 채널 오버라이드까지 적용(D17): `@everyone` → 역할 OR → 채널 오버라이드(@everyone/역할/멤버) → owner/Administrator 단축. 미구현 항목(밴/이모지/스레드/감사로그/리액션/편집·삭제 등)은 TODO Phase 3~4.
 
@@ -128,7 +137,7 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | GET | `/guilds/{guild_id}/invites` | 초대 목록 |
 | GET/POST | `/guilds/{guild_id}/emojis` | 이모지 목록/추가 |
 | DELETE | `/guilds/{guild_id}/emojis/{emoji_id}` | 이모지 삭제 |
-| GET | `/guilds/{guild_id}/audit-logs` | 감사 로그 (VIEW_AUDIT_LOG, Phase 4) |
+| GET | `/guilds/{guild_id}/audit-logs` | 감사 로그 (VIEW_AUDIT_LOG, 구현됨 V16 — 채널/역할/멤버/웹훅 변경 기록, 최신순 커서) |
 
 ---
 
@@ -150,7 +159,8 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | PUT/DELETE | `/channels/{channel_id}/permissions/{overwrite_id}` | 권한 오버라이드 설정/제거 (DB-D4) |
 | POST | `/channels/{channel_id}/typing` | 타이핑 시작 → TYPING_START 팬아웃 |
 | POST | `/channels/{channel_id}/invites` | 채널 초대 생성 |
-| POST | `/channels/{channel_id}/threads` | 스레드 생성 (Phase 4) |
+| POST / GET | `/channels/{channel_id}/threads` | 스레드 생성·목록 (구현됨, D44 — 스레드=channels kind='thread'+parent_id) |
+| PATCH | `/channels/{channel_id}/thread` | 스레드 아카이브/해제 (소유자/MANAGE_THREADS) |
 
 ### 메시지 전송 본문 예시
 ```json
@@ -170,19 +180,23 @@ POST /api/v1/channels/123/messages
 
 ---
 
-## 6. Webhooks (`/webhooks`) — Phase 4
+## 6. Webhooks (`/webhooks`) — 구현됨 (Phase 4, v1.36, V15)
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| POST | `/channels/{channel_id}/webhooks` | 웹훅 생성 |
-| GET | `/channels/{channel_id}/webhooks` | 채널 웹훅 목록 |
-| POST | `/webhooks/{webhook_id}/{token}` | 웹훅 실행 (메시지 전송) |
-| DELETE | `/webhooks/{webhook_id}` | 삭제 |
+| POST | `/channels/{channel_id}/webhooks` | 웹훅 생성 (MANAGE_WEBHOOKS) → 토큰 1회 반환 |
+| GET | `/channels/{channel_id}/webhooks` | 채널 웹훅 목록 (토큰 비노출) |
+| POST | `/webhooks/{webhook_id}/{token}` | 웹훅 실행 (Bearer 없음, URL 토큰) = 채널에 메시지 게시 |
+| DELETE | `/webhooks/{webhook_id}` | 삭제 (MANAGE_WEBHOOKS) |
+
+> 토큰 = opaque 랜덤 + SHA-256 해시 저장(원본 1회 반환). 실행은 메시지를 persist 후 `MESSAGE_CREATE` 팬아웃하되 Realm 액터를 우회한다(seam).
 
 ---
 
-## 7. 검색 (`/guilds/{guild_id}/messages/search`) — Phase 4
-- Postgres FTS 기반 (Q10). 쿼리 파라미터: `content`, `author_id`, `channel_id`, `before`/`after`.
+## 7. 검색 (`/guilds/{guild_id}/messages/search`) — 구현됨 (Phase 4, v1.33, Q10)
+- **Postgres FTS** 기반 (Q10). `messages.content_tsv`(tsvector STORED 생성 컬럼, config `simple`) + GIN 인덱스(V12). 쿼리는 `websearch_to_tsquery('simple', content)`(따옴표/OR/`-` 안전 파싱).
+- 쿼리 파라미터: **`content`**(필수, 검색어), **`limit`**(기본 25, 1~100). `author_id`/`channel_id`/`before`/`after` 필터는 후속.
+- **권한**: 멤버여야 하며(아니면 403), 결과는 **VIEW_CHANNEL 있는 채널로 한정**(채널 오버라이드 존중, D17). 빈 검색어는 400.
 
 ---
 

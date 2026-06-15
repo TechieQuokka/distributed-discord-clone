@@ -99,6 +99,8 @@ impl Permissions {
             | Permissions::CHANGE_NICKNAME
             | Permissions::CONNECT
             | Permissions::SPEAK
+            | Permissions::CREATE_PUBLIC_THREADS
+            | Permissions::SEND_MESSAGES_IN_THREADS
     }
 }
 

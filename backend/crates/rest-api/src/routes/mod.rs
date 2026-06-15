@@ -1,5 +1,7 @@
 //! REST 라우트 조합 (개념: routes). 개념별 서브모듈을 하나의 Router로.
 
+pub mod attachment;
+pub mod audit;
 pub mod auth;
 pub mod channel;
 pub mod dm;
@@ -10,6 +12,8 @@ pub mod message;
 pub mod read_state;
 pub mod relationship;
 pub mod role;
+pub mod thread;
+pub mod webhook;
 
 use domain::repo::Store;
 
@@ -28,6 +32,10 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(role::routes::<S>())
         .merge(channel::routes::<S>())
         .merge(message::routes::<S>())
+        .merge(thread::routes::<S>())
+        .merge(attachment::routes::<S>())
+        .merge(webhook::routes::<S>())
+        .merge(audit::routes::<S>())
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::ratelimit::rate_limit::<S>))
         .with_state(state)
 }

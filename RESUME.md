@@ -8,15 +8,22 @@
 
 1. **`CLAUDE.md`** — 개발 규칙 R1~R7 + 핵심 원칙 P1~P6. **필수.**
 2. `docs/README.md` — 문서 인덱스
-3. `docs/architecture/decisions.md` — 결정 원장 D1~D43(+ 정제 갱신, Q1~Q11) (왜 이렇게 만들었나 = source of truth)
+3. `docs/architecture/decisions.md` — 결정 원장 D1~D44(+ 정제 갱신, Q1~Q11) (왜 이렇게 만들었나 = source of truth)
 4. `TODO.md` — 진행 상태 (`[x]` 완료 / `[~]` 진행중 / `[ ]` 미착수)
 5. `CHANGELOG.md` — 최근 한 일 (최상단이 최신)
 
 필요 시 깊게: `docs/design-discussion.md`(논쟁 서사), `docs/database/*`, `docs/api/*`, `docs/protocol/node-wire.md`, `docs/architecture/permissions.md`.
 
-## 2. 현재 상태 (2026-06-15, v1.32.0)
+## 2. 현재 상태 (2026-06-16, v1.38.0)
 
-- 설계 문서 + Phase 0/1 + **Phase 2(분산 활성화) 완료**. **Phase 3(Discord 본체) 완료** — 초대 + 역할/권한 + 채널 오버라이드 + 멤버 관리 + 메시지 편집·삭제·리액션·답장·멘션(D39) + DM/그룹DM(D8) + 친구·차단(D40) + 읽음 상태(D41) + 전역 presence(D42) + 크로스노드 유저 이벤트 라우팅(D43) 완료. **Phase 4 진행** — 인증/봇방지 묶음(PoW D18 + rate limit D32 + TOTP MFA D19) 완료. **다음: Phase 4 기능(스레드/검색/첨부/파티셔닝/웹훅/감사로그).**
+- 설계 문서 + Phase 0/1 + **Phase 2(분산 활성화) 완료** + **Phase 3(Discord 본체) 완료** + **Phase 4(살붙이기) 완료**.
+- **Phase 4 완료(v1.33~1.38)**: 인증/봇방지(PoW D18·rate limit D32·TOTP MFA D19) + **전문검색(Q10, FTS V12)** + **스레드/포럼(D44, V13)** + **파일첨부(D37, V14 + BlobStore 로컬 FS)** + **웹훅(V15)** + **감사로그(V16)** + **메시지 RANGE 파티셔닝(D28, V17 — nonce 멱등은 앱레벨 dedup으로 이전)**. 각 기능 라이브 e2e 검증. **다음: Phase 5 스트레치 또는 frontend(D30).**
+- Phase 4(1.38, D28): **메시지 RANGE 파티셔닝** — `messages PARTITION BY RANGE(id)` 월별+DEFAULT(V17, 드롭&재생성). 인덱스/FTS GIN 부모 정의→상속. **D34 nonce 멱등을 DB 부분유니크→앱레벨 dedup**(파티션 유니크 제약, create_message 가드 INSERT, dispatch 단일 소비자라 레이스 없음). 첨부 FK 유지(PG12+). 파티션 라우팅+nonce dedup 라이브 검증.
+- Phase 4(1.37): **감사로그** audit_log_entries(V16) — 채널/역할/멤버/웹훅 mutation best-effort 기록 + `GET /guilds/:id/audit-logs`(VIEW_AUDIT_LOG).
+- Phase 4(1.36): **웹훅** webhooks(V15) — opaque 토큰(SHA-256 해시, auth 재사용) + `POST/GET /channels/:cid/webhooks`·`DELETE /webhooks/:id`·실행 `POST /webhooks/:id/:token`(Bearer 없음, persist+MESSAGE_CREATE 액터 우회).
+- Phase 4(1.35, D37): **파일첨부** attachments(V14) 메타 + `BlobStore` 포트(LocalFsBlobStore 바이트). 사후 첨부 `POST/GET /channels/:cid/messages/:mid/attachments`·`GET /attachments/:id`.
+- Phase 4(1.34, D44): **스레드/포럼** — 스레드=channels(kind=thread,parent_id)+thread_meta(V13), 메시징/팬아웃/권한 길드 경로 재사용(P4). `POST/GET /channels/:id/threads`·`PATCH .../thread`. forum=kind.
+- Phase 4(1.33, Q10): **전문검색** — messages content_tsv(STORED)+GIN(V12), `websearch_to_tsquery`, `GET /guilds/:id/messages/search`(VIEW_CHANNEL 채널 필터).
 - Phase 4(1.32, D19): **TOTP MFA** — 2단계 인증(RFC 6238). `auth::totp`(totp-rs, P6). secret은 `users.mfa_totp_secret`(BYTEA, **V1 기존 → 마이그레이션 0**), 민감값이라 전용 포트(`set_totp_secret`/`totp_secret`). 흐름: `enable`(발급·미저장) → `verify`(확인 시 저장=활성, **락아웃 방지**) → `disable`. 로그인은 MFA 활성 시 `{mfa_required:true}` → `POST /auth/mfa/totp`(비번+코드)로 토큰. cli `mfa-enable/mfa-verify/mfa-login/totp-code`. **라이브 e2e**(enable→verify→login mfa_required→2단계 토큰, 틀린 코드 401). seam: 2단계 비번 재제출·백업코드·WebAuthn은 Phase 5. 다음: 스레드/검색 또는 파티셔닝(D28).
 - Phase 4(1.31, D32): **Rate limiting (Token Bucket per-node)** — 봇/폭주 방지. 순수 `TokenBucket`(용량+초당 리필) + per-node `RateLimiter`(`rule:identity` 버킷, **인메모리 DB-D5 휘발**, 분산 근사). REST 미들웨어 — `/auth/*`=전역·인증 유저별·미인증 anon, 초과 시 **429** + `X-RateLimit-*`/`Retry-After`. server `with_defaults`(auth20·user120·anon60) 주입. `rest-api::ratelimit`. **라이브 검증**(scenario 통과 + pow-challenge 폭주 정확히 20→429). seam: 노드별 독립(전역 정밀X)·메시지/WS 미적용·유저해시 승격(b) 후속. 다음: TOTP(D19) 또는 스레드/검색.
 - Phase 4(1.30, D18): **가입 봇방지 PoW** — Phase 1 잔여이자 Phase 4 첫 항목. **stateless 멀티노드**: 챌린지를 저장하지 않고(DB-D5) **PASETO v4.local 토큰**으로 발급(난이도를 인증 claim에 담아 위변조 차단+만료 내장), 공유 키(`POW_SECRET`)로 어느 노드든 검증(D14 철학). 클라는 `sha256(challenge||":"||nonce)` 선행 0비트 ≥ 난이도(기본 18)를 푼다 — **퍼즐 해시만 수제(sha2), 챌린지 MAC은 pasetors(P6 준수)**. `auth::pow`(PowKeys/solve) · `GET /auth/pow-challenge` · `POST /auth/register`가 `pow_challenge`+`pow_nonce` 필수(400) · cli register가 자동 풀이(`auth::pow::solve` 재사용). **단일노드 `cli scenario` e2e PASS**. seam: 챌린지 미저장→만료(1h)까지 같은 해 replay 가능(게이트=난이도)·로그인 PoW·rate limit은 후속. 다음: rate limit(D32) 또는 TOTP(D19).
@@ -37,7 +44,7 @@
 - **인증 종단**: `/auth/register|login|refresh` (PASETO + refresh 회전/재사용탐지 D14).
 - **실시간 메시징 종단**: `PgStore`(통합 저장소, `Store` 슈퍼트레잇) → REST(`/guilds`, `/channels/:id/messages`, 히스토리 D38) → **WS Gateway**(IDENTIFY/READY/HEARTBEAT/DISPATCH, 자동구독 D13) → dispatch 드라이버(persist-then-fanout D24, nonce 멱등 D34) → 세션 push. CLI `scenario`로 종단 자동검증(D1).
 - Snowflake generator는 **노드당 1개**(D11, lock-free CAS)를 server가 소유해 Router·REST·Gateway에 주입.
-- 테스트 **127개** 통과 (DB 통합 + 실 mTLS 2노드 + DST 하네스 + auth 18(PoW 6·TOTP 5) + rest-api 통합 21개(PoW 3·rate limit 1·MFA 1 포함) + ratelimit 유닛 4 + protocol 9/node 20+2 + 멤버/편집·삭제·리액션·답장·멘션(D39)/DM·그룹DM(D8)/친구·차단(D40)/읽음상태(D41)/presence(D42)/크로스노드 유저 라우팅(D43) 포함) + CLI scenario(PoW e2e)·멀티노드·rate limit 429·초대/권한/채널오버라이드/DM/친구·차단/읽음/presence/크로스노드 RELATIONSHIP 라이브 검증. DB 라이브(V1~V11 적용, presence·유저라우팅·PoW·rate limit은 무DB 휘발).
+- 테스트 **138개** 통과 (domain 18 + gateway 8 + node 22 + protocol 9 + auth 18 + actor-rt 2 + transport 10 + cluster-config 3 + **rest-api 30** + **storage 18**). Phase 4 추가분: 검색·스레드·첨부·웹훅·감사로그 storage/rest-api 통합 + 파티션 라우팅. CLI scenario(PoW e2e) + 각 Phase 4 기능 라이브 e2e(검색/스레드/첨부 업다운/웹훅 실행/감사로그/파티션 nonce dedup). DB 라이브(**V1~V17 적용**, presence·유저라우팅·PoW·rate limit·blob FS는 무DB).
 
 ## 3. 빌드·테스트·DB (⚠ crate별 독립 — R7)
 
@@ -50,7 +57,7 @@ cd backend/crates/<name> && cargo test
 #   postgres://david:2147483647@%2Fvar%2Frun%2Fpostgresql:48853/discord_v1
 cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2Frun%2Fpostgresql:48853/discord_v1' cargo test
 ```
-- 마이그레이션 V1(users/realms/guilds/channels/messages) · **V2 `refresh_tokens`** · **V3 `members`** · **V4 `invites`** · **V5 `roles`+`member_roles`** · **V6 `channel_overwrites`**(+`overwrite_kind` enum) · **V7 `reactions`**(유니코드 emoji PK) · **V8 `message_mentions`**(유저 멘션 PK) · **V9 `dm_pairs`**(1:1 DM 중복방지, user_lo<user_hi) · **V10 `relationships`**(친구·차단 방향성 행 + `relation_kind` enum) · **V11 `read_states`**(채널별 last_read + mention_count) 적용됨. psql: `psql -p 48853 -d discord_v1`.
+- 마이그레이션 V1(users/realms/guilds/channels/messages) · **V2 `refresh_tokens`** · **V3 `members`** · **V4 `invites`** · **V5 `roles`+`member_roles`** · **V6 `channel_overwrites`**(+`overwrite_kind` enum) · **V7 `reactions`**(유니코드 emoji PK) · **V8 `message_mentions`**(유저 멘션 PK) · **V9 `dm_pairs`**(1:1 DM 중복방지, user_lo<user_hi) · **V10 `relationships`**(친구·차단 방향성 행 + `relation_kind` enum) · **V11 `read_states`**(채널별 last_read + mention_count) · **V12** messages `content_tsv`+GIN(FTS Q10) · **V13 `thread_meta`**(스레드 D44) · **V14 `attachments`**(첨부 D37) · **V15 `webhooks`** · **V16 `audit_log_entries`** · **V17** messages `PARTITION BY RANGE(id)`(D28, 월별+DEFAULT, nonce 유니크 제거→앱레벨 dedup) 적용됨. psql: `psql -p 48853 -d discord_v1`.
 - 서버 실행(단일노드): `cd backend/bins/server && DATABASE_URL=... REST_ADDR=127.0.0.1:8080 cargo run`.
 - **멀티노드(mTLS 메시)**: `server gen-certs /tmp/mesh 1 2` + `server gen-keys` → 노드별 `CLUSTER_CONFIG`(TOML: node id/worker_id/listen_addr + peers) + `TLS_CA/TLS_CERT/TLS_KEY` + 공유 `PASETO_SECRET/PASETO_PUBLIC` + **공유 `POW_SECRET`**(D18, gen-keys가 발급) env로 각각 기동. (작은 id가 큰 id에게 dial.)
 - 종단 데모(서버 띄운 뒤): `cd backend/bins/cli && cargo run -- --url http://127.0.0.1:8080 scenario` → 가입~메시지수신 자동 검증.
@@ -64,14 +71,17 @@ cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2F
 - 친구·차단(Phase 3, D40) CLI: `add-friend --token T --user U`(요청, 상대가 이미 요청했으면 수락) · `block-user --token T --user U` · `remove-relationship --token T --user U`(친구삭제/취소·거절/차단해제) · `relationships --token T`(목록). 변동 시 `RELATIONSHIP_ADD/_REMOVE`가 대상 유저의 접속 세션에 통지(`listen`으로 확인). 차단하면 그 상대와 1:1 DM 열기·전송 거부.
 - 읽음 상태(Phase 3, D41) CLI: `ack --token T --channel C --message M`(채널을 그 메시지까지 읽음) · `read-states --token T`(채널별 last_read + 안 읽은 멘션 수). 멘션 받으면 mention_count 증가, ack로 재계산·리셋. ack 시 본인 다른 세션에 `MESSAGE_ACK` 통지(`listen`으로 확인). READY에도 read_states 포함.
 - 전역 presence(Phase 3, D42): 별도 CLI 없음 — 친구끼리 `listen` 중에 상대가 접속/종료하면 `PRESENCE_UPDATE`(online/offline) 수신, READY `presences`에 현재 온라인 친구. 크로스노드는 2노드 mesh에서 자동(gossip). idle/dnd 설정(C→S op 3)은 후속.
+- Phase 4 CLI: `search --token T --guild G --content "q"`(전문검색) · `create-channel ... --kind forum` · `create-thread --token T --channel C --name n`/`list-threads`/`archive-thread --thread TID --archived true|false` · `upload-attachment --token T --channel C --message M --file PATH`/`attachments`/`download-attachment --attachment A --out PATH` · `create-webhook --token T --channel C --name n`(토큰 1회 반환)/`list-webhooks`/`execute-webhook --webhook W --webhook-token WT --content "..."`(Bearer 없음)/`delete-webhook` · `audit-logs --token T --guild G`. 서버 첨부 저장: env `ATTACHMENT_DIR`(기본 ./attachments).
 
 ## 4. 다음 작업 — 여기서 이어서
 
-**Phase 3 완료 + Phase 4 진행.** Phase 3(D17·D39·D8·D40·D41·D42·D43) 전부 완료. **Phase 4: 인증/봇방지 묶음(PoW D18 + rate limit D32 + TOTP MFA D19) 완료.** 다음 후보:
+**Phase 4 완료.** Phase 3(D17·D39·D8·D40~D43) + Phase 4(인증/봇방지 + 검색 Q10 + 스레드/포럼 D44 + 첨부 D37 + 웹훅 + 감사로그 + 파티셔닝 D28) 전부 완료. 다음 후보:
 
-1. **Phase 4 계속(살붙이기)** — 남은 것: 스레드/포럼 · 웹훅 · 감사로그 · 검색(Postgres FTS, Q10) · 파일첨부(D37) · **메시지 시간 RANGE 파티셔닝(D28)**. 인증/봇방지 묶음은 일단락 → **스레드/검색**으로 기능 폭 확장하거나, **파티셔닝(D28)**으로 분산 인프라(테마)를 심화하는 게 자연스러움.
-2. **하드닝/seam 회수** — ~~D40/D41 크로스노드 유저 라우팅~~(**D43 완료**, v1.29) 이후 남은 것: 크로스노드 RESUME(버퍼 노드 로컬), D35 Realm 캐시 warmup, presence anti-entropy(신규 노드 join 동기화)·idle/dnd op(3) 등.
-3. **frontend 착수** — R4상 backend·API·CLI가 사실상 일단락 → web UI(React+TS+Vite, D30) 시작 가능.
+1. **frontend 착수 (권장)** — R4상 backend·API·CLI가 사실상 완료(Phase 0~4) → web UI(React+TS+Vite, D30) 시작이 자연스러움.
+2. **Phase 5 스트레치** — WebAuthn/Passkeys(D19) · CRDT 오프라인 동기화 · **gossip discovery(SWIM 동적 노드 합류·presence anti-entropy, Q11 잔여)** · 이벤트 소싱(D23) · Voice 시그널링(D21) · MinIO 첨부(D37).
+3. **하드닝/seam 회수** — 크로스노드 RESUME(버퍼 노드 로컬), D35 Realm 캐시 warmup, idle/dnd op(3), 신규 월 파티션 사전 생성 스케줄, 웹훅/스레드 잔여 seam(SEND_MESSAGES_IN_THREADS 분리·forum_tags 등).
+
+> Phase 4 구현 seam 요약: nonce 멱등 = 앱레벨 dedup(파티셔닝 제약, D34) · 첨부는 사후 첨부(전송 시 동시 첨부 아님, D37) · 웹훅 실행은 Realm 액터 우회(persist-then-emit) · 감사로그는 대표 mutation만 기록(best-effort) · 검색은 길드 단위(author/랭킹 후속).
 
 > D42 presence: 전역 presence가 gossip(풀메시 broadcast + 로컬 친구 필터) 경로를 확립 + `user→호스팅 노드` 디렉터리를 만듦. **D43**이 이 디렉터리를 재사용해 `RELATIONSHIP_*`/`MESSAGE_ACK`의 **크로스노드 유저 라우팅을 완료**(presence처럼 broadcast가 아니라 호스팅 노드에 `USER_DELIVER` 타깃 전송). presence 자체 seam(잔존): 신규 노드 join 시 과거 presence 동기화(anti-entropy) 없음 · idle/dnd(op 3) · 전 노드 재시작 시 휘발 리셋 · 디렉터리는 live 세션만 추적(원격 detach-grace 세션 in-flight 미수신, RESUME/READY로 복구).
 > D39 후속 seam: GUILD_MEMBER_ADD는 현재 **기존 접속 멤버**에게만 통지(신규 합류자 본인은 redeem 응답/다음 READY로 상태 확보) — 합류 직후 자동구독 트리거는 후속. emit은 fire-and-forget(라우팅 실패 조용히 드롭). 리액션 집계 카운트(GET reactions/유저목록)·커스텀 이모지(emoji_id)는 Phase 4.

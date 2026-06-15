@@ -5,6 +5,94 @@
 
 ---
 
+## [1.38.0] - 2026-06-16
+### 새 기능
+- **메시지 시간 RANGE 파티셔닝 (Phase 4, D28)** — `messages`를 `PARTITION BY RANGE (id)`로 전환(드롭&재생성, 로컬 데이터 폐기).
+  - **왜 RANGE(id)**: Snowflake id 상위 비트=시간 → "최근=핫" 지역성(04 §2). realm 해시는 런타임 라우팅이 이미 담당.
+  - **파티션**: 월별(id 경계 = `(month_start_ms - EPOCH) << 22`) — `messages_2026_06`/`_07` + `messages_default` 캐치올. 인덱스(`ix_messages_channel`, FTS GIN)는 부모에 정의 → 파티션 상속.
+  - **D34 변경(중요)**: nonce 멱등성을 **DB 부분 유니크 → 앱레벨 dedup**으로 이전. Postgres는 파티션 테이블 유니크 인덱스에 파티션 키(id) 포함을 강제 → `uq(channel,author,nonce)` 불가. `create_message`가 가드 INSERT(`WHERE NOT EXISTS (동일 channel,author,nonce)`)로 dedup — dispatch 드라이버가 **단일 직렬 소비자**라 레이스 없음(D24). 사용자 승인 결정.
+  - **첨부 FK 유지**: PG 12+는 파티션 부모 참조 FK + ON DELETE CASCADE 지원 → 04 §2의 앱레벨 완화(a) 불필요, `attachments.message_id → messages(id)` CASCADE 복원.
+  - `storage`: **마이그레이션 V17**(FK 제거→DROP→파티션 부모 재생성→월별/DEFAULT 파티션→FK 복원) + `create_message` 앱레벨 dedup. (1.15→1.16)
+- 문서(R2): decisions **D28 구현 + D34 갱신**(앱레벨 dedup), `database/04-partitioning-and-distributed.md` §2(V17 구현, FK 유지), `database/02-schema.md`(messages 파티션 노트). TODO 체크.
+- **라이브 검증**: 파티션 라우팅(id 3.4e17 → `messages_2026_06`) + 전체 파이프라인 e2e(전송→파티션 적재, **같은 nonce 2회→1건 dedup**) + storage 18 테스트 전부 파티션 테이블에서 통과(nonce 멱등·FTS·첨부 CASCADE·read_state).
+- seam: 신규 월 파티션 사전 생성은 운영 작업(04 §6, 현재 DEFAULT가 흡수) · 과거 파티션 아카이브/detach는 후속.
+- 전 crate 테스트 합계 **138** (storage 18, 파티션 전환으로 테스트 수 불변).
+
+## [1.37.0] - 2026-06-16
+### 새 기능
+- **감사 로그 (Phase 4)** — 길드 관리 행위 시간순 기록 + 조회.
+  - **모델**: `audit_log_entries`(V16: id Snowflake=시간순, realm/actor/action_type i16/target/changes jsonb). `changes`는 **불투명 JSON 문자열**(생산 엣지 조립, storage는 jsonb↔text 캐스트로 serde 무의존).
+  - **기록(best-effort)**: 채널 생성(10)·역할 생성(30)·역할 부여(25)·닉 수정(24)·추방(20)·웹훅 생성(50)/삭제(52) 라우트가 mutation 후 `record()` 헬퍼로 남긴다(실패해도 주 동작 진행).
+  - **조회**: `GET /guilds/:id/audit-logs?before=&limit=`(VIEW_AUDIT_LOG, 최신순 Snowflake 커서).
+  - `domain`: 신규 **`audit`** 모듈(`AuditAction` 코드/`AuditEntry`/`NewAuditEntry`) + `AuditRepository`(log/list) + Store 합류. (1.14→1.15)
+  - `storage`: PgStore 구현 + **마이그레이션 V16**(`audit_log_entries`). 종단 통합 +1. (1.14→1.15)
+  - `rest-api`: `routes/audit`(조회 + `record` 헬퍼) + 5개 mutation 라우트에 기록 삽입. MemStore audit + 통합 +1. (1.16→1.17)
+  - `cli`: `audit-logs`. (1.15→1.16)
+- 문서(R2): decisions(감사 기록 = best-effort 사후 기록), `api/rest.md`(audit-logs 라우트), `database/02-schema.md`(audit V16). TODO 체크.
+- **라이브 e2e**: 단일노드 — create-channel/create-role/create-webhook → `audit-logs`(**action 10/30/50, actor·target, 최신순 3건**). rest-api 통합(기록·최신순·changes·비권한 403).
+- seam: 길드/멤버/채널 update·delete·밴 등 일부 mutation 미기록(대표 집합) · reason 필드·동일 트랜잭션 보장은 후속.
+- 전 crate 테스트 합계 **138** (storage 17→18 · rest-api 29→30 등).
+
+## [1.36.0] - 2026-06-16
+### 새 기능
+- **웹훅 (Phase 4)** — 토큰으로 채널에 메시지를 게시하는 외부 진입점.
+  - **토큰**: opaque 랜덤 + SHA-256 해시 저장(`auth::generate_refresh`/`hash_refresh` 재사용 — 크립토는 검증 크레이트 한 곳에, P6/D14). 원본은 생성 시 **1회만** 반환, DB엔 해시(`webhooks.token_hash`)만.
+  - **실행**: `POST /webhooks/:id/:token`(Bearer 없음, URL 토큰 인증). 메시지를 **rest-api가 직접 persist + `MESSAGE_CREATE` emit**(Realm 액터 우회 seam) → Realm 구독자에 팬아웃. author=웹훅 creator, payload에 `webhook_id`. 틀린 토큰 401.
+  - **관리**: `POST/GET /channels/:cid/webhooks`(생성·목록, MANAGE_WEBHOOKS) · `DELETE /webhooks/:id`(MANAGE_WEBHOOKS). 목록은 토큰 비노출.
+  - `domain`: 신규 **`webhook`** 모듈 + `WebhookRepository`(create/list/get/delete) + Store 합류. (1.13→1.14)
+  - `storage`: PgStore 구현 + **마이그레이션 V15**(`webhooks`). 종단 통합 +1. (1.13→1.14)
+  - `rest-api`: `routes/webhook` + `events::webhook_message_payload`. MemStore webhook + 통합 +1. (1.15→1.16)
+  - `cli`: `create-webhook`/`list-webhooks`/`execute-webhook`/`delete-webhook`. (1.14→1.15)
+- 문서(R2): decisions(웹훅 = 토큰 게시 + 액터 우회 seam), `api/rest.md`(웹훅 라우트), `database/02-schema.md`(webhooks V15). TODO 체크.
+- **라이브 e2e**: 단일노드 — create(토큰 반환) → execute(Bearer 없음) → 히스토리에 메시지 게시 확인 → 틀린 토큰 401 → delete → 실행 404. rest-api 통합(생성/목록 토큰 비노출/멤버 403/실행/틀린토큰 401/빈내용 400/삭제 후 404).
+- seam: 웹훅 메시지는 Realm 액터 우회(persist-then-emit, id 단조성은 노드 generator로 유지) · 웹훅 avatar/username override·실행 rate limit은 후속.
+- 전 crate 테스트 합계 **136** (storage 16→17 · rest-api 28→29 등).
+
+## [1.35.0] - 2026-06-16
+### 새 기능
+- **파일 첨부 (Phase 4, D37) — 로컬 FS** — 메타데이터와 바이트를 분리한 헥사고날 첨부.
+  - **분리**: 메타(`attachments` 테이블 V14: filename/size/content_type/url)는 `AttachmentRepository`(PgStore), 바이트는 **`BlobStore` 포트**(domain) 뒤로 — 로컬 FS 구현(`LocalFsBlobStore`), MinIO/S3는 같은 포트의 후속 adapter(D37). 둘 다 domain은 포트로만 안다(P2/P6).
+  - **흐름**: 우리 전송은 비동기(gateway→Router→actor라 업로드 시점에 message_id 없음) → **이미 존재하는 메시지에 사후 첨부**로 단순화. `POST /channels/:cid/messages/:mid/attachments`(멀티파트, 작성자 + ATTACH_FILES, 8 MiB 상한) → 바이트는 BlobStore(key=첨부 Snowflake id), 메타는 DB. `GET .../attachments`(목록, VIEW_CHANNEL) · `GET /attachments/:id`(다운로드, 채널 VIEW_CHANNEL + content-type/disposition).
+  - `domain`: 신규 **`attachment`**(`Attachment`/`NewAttachment`) + **`blob`**(`BlobStore` 포트, dyn 박스 future) 모듈 + `AttachmentRepository` + `AttachmentId`/`WebhookId` id + Store 합류. (1.12→1.13)
+  - `storage`: PgStore 구현 + **`LocalFsBlobStore`**(tokio fs, 경로 탈출 키 차단) + **마이그레이션 V14**(`attachments`, message FK CASCADE). 통합 +1, blob 유닛 +1. (1.12→1.13)
+  - `rest-api`: `routes/attachment`(업로드/목록/다운로드) + `AppState`에 `Arc<dyn BlobStore>` 주입 + axum `multipart` 기능. MemStore attachment + MemBlobStore + 통합 +1. (1.14→1.15)
+  - `cli`: `upload-attachment`/`attachments`/`download-attachment` + reqwest `multipart`. (1.13→1.14)
+  - server: `LocalFsBlobStore::new(env ATTACHMENT_DIR, 기본 ./attachments)` 주입. (1.3→1.4)
+- 문서(R2): decisions **D37** 구현 노트, `api/rest.md`(첨부 라우트), `database/02-schema.md`(attachments V14 구현 표시). TODO 체크.
+- **라이브 e2e**: 단일노드 — send → 히스토리에서 mid 확보 → upload(22 bytes) → 목록 → download → **바이트 diff 일치** + 로컬 FS에 blob 파일 기록 확인. rest-api 통합(업로드/목록/다운로드/비작성자403/비멤버403/없는첨부404).
+- seam: 메시지 전송 시 동시 첨부(현재 사후 첨부)·이미지 width/height 추출·MinIO·바이트 스트리밍(현재 메모리 적재 8 MiB 상한)은 후속.
+- 전 crate 테스트 합계 **134** (storage 14→16 · rest-api 27→28 등).
+
+## [1.34.0] - 2026-06-16
+### 새 기능
+- **스레드 / 포럼 채널 (Phase 4, D44)** — Realm 통일 추상(P4)의 또 한 번의 배당.
+  - **핵심**: 스레드 = 부모 채널과 **같은 Realm의 `channels`(kind='thread', parent_id) 한 행** + `thread_meta` 보강. 메시징·팬아웃(D12 구독자표)·권한·자동구독(D13)을 **길드 채널과 무변경 공유** — gateway/node/protocol 코드 추가 0. 라이브에서 스레드 메시지가 기존 send 경로로 그대로 흐름 확인.
+  - **포럼**: `channels.kind='forum'` 채널을 일반 채널 생성(`?kind=forum`)으로. 스레드는 text/announcement/forum 아래 생성(thread/dm 아래 금지).
+  - **message_count**: thread_meta 컬럼은 스키마 충실성용, 실제 카운트는 **조회 시 messages 집계**(쓰기 경로 비결합).
+  - `domain`: 신규 **`thread`** 모듈(`Thread`/`NewThread`) + `ThreadRepository`(create/get/list/archive) + Store 합류. `default_everyone`에 **CREATE_PUBLIC_THREADS·SEND_MESSAGES_IN_THREADS** 추가(스레드 기본 사용 가능, Discord 정렬). (1.11→1.12)
+  - `storage`: PgStore 구현(채널+메타 트랜잭션, 집계 SELECT) + **마이그레이션 V13**(`thread_meta`). 종단 통합 +1. (1.11→1.12)
+  - `rest-api`: `POST`/`GET /channels/:id/threads`(생성 CREATE_PUBLIC_THREADS·목록 VIEW_CHANNEL), `PATCH /channels/:id/thread`(아카이브, 소유자/MANAGE_THREADS) + 길드 채널 생성에 `kind` 지원. `THREAD_CREATE`/`THREAD_UPDATE` 팬아웃(D39). MemStore thread + 통합 +1. (1.13→1.14)
+  - `cli`: `create-thread`/`list-threads`/`archive-thread` + `create-channel --kind`. (1.12→1.13)
+- 문서(R2): decisions **D44**(스레드=채널 P4 재사용), `api/rest.md`(스레드 라우트 구현), `api/gateway.md`(THREAD_* 이벤트), `database/02-schema.md`(thread_meta V13 구현 표시). TODO 체크.
+- **라이브 e2e**: 단일노드 — forum 채널 생성 → 스레드 생성(parent/owner) → **스레드에 send ×2(기존 경로)** → list-threads(msgs=2 집계) → 스레드 히스토리 → archive true/false. rest-api 통합(생성/목록/비멤버403/아카이브 소유자·MANAGE_THREADS·owner단축/잘못된 kind 400).
+- seam: 스레드 join(명시 구독)은 realm 자동구독으로 대체(P4) · SEND_MESSAGES_IN_THREADS 분리 강제·포럼 태그(`forum_tags`)·자동 아카이브 만료는 후속.
+- 전 crate 테스트 합계 **131** (storage 13→14 · rest-api 26→27 등).
+
+## [1.33.0] - 2026-06-16
+### 새 기능
+- **메시지 전문검색 (Phase 4, Q10/D28 §5) — Postgres FTS** — 외부 검색엔진 없이 Postgres 내장 전문검색.
+  - **모델**: `messages.content_tsv`(tsvector **STORED 생성 컬럼**, config=`simple` — 언어 무관·스테밍 없음, 혼합언어 안전) + **GIN 인덱스**(`ix_messages_fts`). 04 §5 청사진 그대로. 파티셔닝(D28) 전환 시 GIN은 파티션에 상속.
+  - **쿼리**: `websearch_to_tsquery('simple', $q)` — 사용자 입력 안전 파싱(따옴표/OR/`-` 지원, 파서 에러 없음). `content_tsv @@` 매칭을 GIN이 가속.
+  - **권한**: 길드 단위 검색이되 결과는 **VIEW_CHANNEL 있는 채널로 한정**(채널별 오버라이드 존중, D17). 멤버 아니면 403. 권한 필터는 라우트가, FTS는 storage가.
+  - `domain`: `MessageRepository::search_messages(realm, channels, query, limit)` 포트. (1.10→1.11)
+  - `storage`: PgStore 구현 + **마이그레이션 V12**(`0012_message_fts.sql`). FTS 종단 통합 테스트 +1. (1.10→1.11)
+  - `rest-api`: `GET /guilds/:id/messages/search?content=&limit=`(VIEW_CHANNEL 채널 필터). MemStore search + 권한필터 통합 +1. (1.12→1.13)
+  - `cli`: `search --token --guild --content [--limit]`. (1.11→1.12)
+- 문서(R2): decisions **Q10 해결**(§5 미결 → 구현), `api/rest.md`(§0 구현현황 + §7 검색), `database/04-partitioning-and-distributed.md` §5(V12 구현 표시). TODO 체크.
+- **라이브 e2e**: 단일노드 — register(PoW)→create-guild→send ×3→`search "fox"`(**2건, 최신순**)·`"dog"`(1건)·`"elephant"`(0건). storage 통합(매칭/채널필터/삭제제외/빈채널) + rest-api 통합(매칭/빈결과/빈쿼리400/채널 VIEW_CHANNEL deny 필터/비멤버 403).
+- seam: 길드 단위(전역 검색 X) · author/before/after 필터·하이라이트·랭킹(ts_rank)은 후속.
+- 전 crate 테스트 합계 **129** (storage 12→13 · rest-api 25→26 등).
+
 ## [1.32.0] - 2026-06-15
 ### 새 기능
 - **TOTP MFA (Phase 4, D19)** — 2단계 인증(RFC 6238). 인증/봇방지 묶음 마무리.

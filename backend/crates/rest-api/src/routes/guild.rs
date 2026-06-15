@@ -30,6 +30,20 @@ pub struct CreateGuildReq {
 #[derive(Deserialize)]
 pub struct CreateChannelReq {
     pub name: String,
+    /// 채널 종류 (생략 시 text). 길드 채널 = text/voice/category/announcement/forum (thread/dm 불가).
+    pub kind: Option<String>,
+}
+
+/// 길드 채널로 허용되는 kind 파싱 (thread는 `/channels/:id/threads`로, dm은 DM 경로로만 생성).
+fn parse_guild_channel_kind(s: Option<&str>) -> Result<ChannelKind, ApiError> {
+    match s.unwrap_or("text") {
+        "text" => Ok(ChannelKind::Text),
+        "voice" => Ok(ChannelKind::Voice),
+        "category" => Ok(ChannelKind::Category),
+        "announcement" => Ok(ChannelKind::Announcement),
+        "forum" => Ok(ChannelKind::Forum),
+        _ => Err(ApiError::BadRequest("kind must be text/voice/category/announcement/forum".into())),
+    }
 }
 
 #[derive(Serialize)]
@@ -106,14 +120,20 @@ async fn create_channel<S: Store + 'static>(
     }
     // 채널 생성은 MANAGE_CHANNELS 필요 (D17).
     crate::perm::require(&*st.store, realm_id, user, domain::permissions::Permissions::MANAGE_CHANNELS).await?;
+    let kind = parse_guild_channel_kind(req.kind.as_deref())?;
 
     let id = ChannelId(st.snowflakes.next(st.clock.now_ms()));
     st.store
-        .create_channel(&NewChannel { id, realm_id, kind: ChannelKind::Text, name: name.to_owned() })
+        .create_channel(&NewChannel { id, realm_id, kind, name: name.to_owned() })
         .await?;
+    crate::routes::audit::record(
+        &st, realm_id, user, domain::audit::AuditAction::ChannelCreate, Some(id.0.raw()),
+        Some(serde_json::json!({ "name": name, "kind": kind.as_str() }).to_string()),
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
-        Json(ChannelView { id: id.0.raw().to_string(), name: Some(name.to_owned()), kind: "text".into() }),
+        Json(ChannelView { id: id.0.raw().to_string(), name: Some(name.to_owned()), kind: kind.as_str().to_owned() }),
     ))
 }

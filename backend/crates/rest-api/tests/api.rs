@@ -15,7 +15,8 @@ use domain::channel::{Channel, NewChannel};
 use domain::dm::{DmChannel, NewDm, NewGroupDm};
 use domain::guild::{Guild, NewGuild};
 use domain::id::{
-    ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, Snowflake, SnowflakeGenerator, UserId,
+    AttachmentId, ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, Snowflake,
+    SnowflakeGenerator, UserId, WebhookId,
 };
 use domain::invite::{Invite, NewInvite};
 use domain::member::Member;
@@ -24,12 +25,18 @@ use domain::permissions::{ChannelOverwrite, Permissions};
 use domain::read_state::ReadState;
 use domain::refresh_token::{NewRefreshToken, RefreshToken};
 use domain::relationship::{RelationKind, Relationship};
+use domain::attachment::{Attachment, NewAttachment};
+use domain::audit::{AuditEntry, NewAuditEntry};
+use domain::blob::{BlobError, BlobStore};
 use domain::repo::{
-    ChannelOverwriteRepository, ChannelRepository, DmRepository, GuildRepository, InviteRepository,
-    MessageRepository, ReactionRepository, ReadStateRepository, RefreshTokenRepository,
-    RelationshipRepository, RepoError, RoleRepository, UserRepository,
+    AttachmentRepository, AuditRepository, ChannelOverwriteRepository, ChannelRepository,
+    DmRepository, GuildRepository, InviteRepository, MessageRepository, ReactionRepository,
+    ReadStateRepository, RefreshTokenRepository, RelationshipRepository, RepoError, RoleRepository,
+    ThreadRepository, UserRepository, WebhookRepository,
 };
 use domain::role::{NewRole, Role};
+use domain::thread::{NewThread, Thread};
+use domain::webhook::{NewWebhook, Webhook};
 use domain::user::{NewUser, User};
 use node::clock::{Clock, ManualClock};
 use rest_api::AppState;
@@ -58,6 +65,10 @@ struct Inner {
     mentions: HashSet<(u64, u64)>,              // (message, user)
     read_states: HashMap<(u64, u64), (Option<u64>, i32)>, // (user, channel) → (last_read, mention_count)
     totp: HashMap<u64, Vec<u8>>,                 // user → TOTP secret (D19)
+    threads: HashMap<u64, (u64, Option<u64>, bool, i32)>, // channel → (parent, owner, archived, auto_archive)
+    attachments: Vec<Attachment>,
+    webhooks: Vec<Webhook>,
+    audit: Vec<AuditEntry>,
 }
 
 #[derive(Default, Clone)]
@@ -608,6 +619,92 @@ impl MessageRepository for MemStore {
         }
         Ok(())
     }
+    async fn search_messages(
+        &self,
+        realm: RealmId,
+        channels: &[ChannelId],
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, RepoError> {
+        if channels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chans: HashSet<u64> = channels.iter().map(|c| c.0.raw()).collect();
+        let q = query.to_lowercase();
+        let g = self.inner.lock().unwrap();
+        let mut v: Vec<Message> = g
+            .messages
+            .iter()
+            .filter(|m| m.realm_id == realm && chans.contains(&m.channel_id.0.raw()))
+            .filter(|m| !g.deleted_messages.contains(&m.id.0.raw()))
+            // FTS 대용: 토큰 단위 substring 매칭(라우트·권한 필터 검증이 목적, 실제 FTS는 storage 테스트).
+            .filter(|m| m.content.to_lowercase().split_whitespace().any(|w| w.contains(&q)))
+            .cloned()
+            .collect();
+        v.sort_by_key(|m| std::cmp::Reverse(m.id.0.raw()));
+        v.truncate(limit.max(0) as usize);
+        Ok(v)
+    }
+}
+
+impl ThreadRepository for MemStore {
+    async fn create_thread(&self, t: &NewThread) -> Result<(), RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        g.channels.insert(
+            t.id.0.raw(),
+            Channel {
+                id: t.id,
+                realm_id: t.realm_id,
+                kind: domain::channel::ChannelKind::Thread,
+                name: Some(t.name.clone()),
+                position: 0,
+            },
+        );
+        g.threads.insert(t.id.0.raw(), (t.parent_id.0.raw(), Some(t.owner.0.raw()), false, t.auto_archive));
+        Ok(())
+    }
+    async fn get_thread(&self, channel: ChannelId) -> Result<Option<Thread>, RepoError> {
+        let g = self.inner.lock().unwrap();
+        Ok(g.threads.get(&channel.0.raw()).map(|&(parent, owner, archived, auto)| {
+            let ch = g.channels.get(&channel.0.raw());
+            let mc = g.messages.iter().filter(|m| m.channel_id == channel && !g.deleted_messages.contains(&m.id.0.raw())).count() as i64;
+            Thread {
+                id: channel,
+                realm_id: ch.map(|c| c.realm_id).unwrap_or(RealmId(Snowflake::from_raw(0))),
+                parent_id: ChannelId(Snowflake::from_raw(parent)),
+                name: ch.and_then(|c| c.name.clone()),
+                owner_id: owner.map(|o| UserId(Snowflake::from_raw(o))),
+                archived,
+                auto_archive: auto,
+                message_count: mc,
+            }
+        }))
+    }
+    async fn list_threads(&self, parent: ChannelId) -> Result<Vec<Thread>, RepoError> {
+        let ids: Vec<u64> = {
+            let g = self.inner.lock().unwrap();
+            let mut v: Vec<u64> = g.threads.iter().filter(|(_, t)| t.0 == parent.0.raw()).map(|(c, _)| *c).collect();
+            v.sort_by_key(|c| std::cmp::Reverse(*c));
+            v
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(t) = self.get_thread(ChannelId(Snowflake::from_raw(id))).await? {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+    async fn set_thread_archived(&self, channel: ChannelId, archived: bool) -> Result<bool, RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        match g.threads.get_mut(&channel.0.raw()) {
+            Some(t) => {
+                t.2 = archived;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 impl ReadStateRepository for MemStore {
@@ -661,6 +758,96 @@ impl ReactionRepository for MemStore {
     }
 }
 
+impl AttachmentRepository for MemStore {
+    async fn add_attachment(&self, a: &NewAttachment) -> Result<(), RepoError> {
+        self.inner.lock().unwrap().attachments.push(Attachment {
+            id: a.id,
+            message_id: a.message_id,
+            filename: a.filename.clone(),
+            size_bytes: a.size_bytes,
+            content_type: a.content_type.clone(),
+            url: a.url.clone(),
+        });
+        Ok(())
+    }
+    async fn list_attachments(&self, message_id: MessageId) -> Result<Vec<Attachment>, RepoError> {
+        Ok(self.inner.lock().unwrap().attachments.iter().filter(|a| a.message_id == message_id).cloned().collect())
+    }
+    async fn get_attachment(&self, id: AttachmentId) -> Result<Option<Attachment>, RepoError> {
+        Ok(self.inner.lock().unwrap().attachments.iter().find(|a| a.id == id).cloned())
+    }
+}
+
+impl WebhookRepository for MemStore {
+    async fn create_webhook(&self, w: &NewWebhook) -> Result<(), RepoError> {
+        self.inner.lock().unwrap().webhooks.push(Webhook {
+            id: w.id,
+            channel_id: w.channel_id,
+            realm_id: w.realm_id,
+            name: w.name.clone(),
+            creator_id: Some(w.creator_id),
+            token_hash: w.token_hash.clone(),
+        });
+        Ok(())
+    }
+    async fn list_webhooks(&self, channel_id: ChannelId) -> Result<Vec<Webhook>, RepoError> {
+        Ok(self.inner.lock().unwrap().webhooks.iter().filter(|w| w.channel_id == channel_id).cloned().collect())
+    }
+    async fn get_webhook(&self, id: WebhookId) -> Result<Option<Webhook>, RepoError> {
+        Ok(self.inner.lock().unwrap().webhooks.iter().find(|w| w.id == id).cloned())
+    }
+    async fn delete_webhook(&self, id: WebhookId) -> Result<bool, RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        let before = g.webhooks.len();
+        g.webhooks.retain(|w| w.id != id);
+        Ok(g.webhooks.len() < before)
+    }
+}
+
+impl AuditRepository for MemStore {
+    async fn log_audit(&self, e: &NewAuditEntry) -> Result<(), RepoError> {
+        self.inner.lock().unwrap().audit.push(AuditEntry {
+            id: e.id,
+            realm_id: e.realm_id,
+            actor_id: Some(e.actor_id),
+            action: e.action,
+            target_id: e.target_id,
+            changes: e.changes.clone(),
+        });
+        Ok(())
+    }
+    async fn list_audit(&self, realm: RealmId, before: Option<u64>, limit: i64) -> Result<Vec<AuditEntry>, RepoError> {
+        let g = self.inner.lock().unwrap();
+        let mut v: Vec<AuditEntry> = g
+            .audit
+            .iter()
+            .filter(|e| e.realm_id == realm)
+            .filter(|e| before.map(|b| e.id.raw() < b).unwrap_or(true))
+            .cloned()
+            .collect();
+        v.sort_by_key(|e| std::cmp::Reverse(e.id.raw()));
+        v.truncate(limit.max(0) as usize);
+        Ok(v)
+    }
+}
+
+/// 인메모리 BlobStore (테스트용) — key→bytes.
+#[derive(Default, Clone)]
+struct MemBlobStore {
+    blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+impl BlobStore for MemBlobStore {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> domain::emit::BoxFuture<'_, Result<(), BlobError>> {
+        self.blobs.lock().unwrap().insert(key.to_owned(), bytes);
+        Box::pin(async { Ok(()) })
+    }
+    fn get(&self, key: &str) -> domain::emit::BoxFuture<'_, Result<Option<Vec<u8>>, BlobError>> {
+        let v = self.blobs.lock().unwrap().get(key).cloned();
+        Box::pin(async move { Ok(v) })
+    }
+}
+
 // ----- 테스트 하네스 -----
 
 /// 발생한 emit(realm, t, payload)을 기록하는 테스트 emitter (D39 팬아웃 검증용).
@@ -698,6 +885,7 @@ struct Harness {
     clock: Arc<ManualClock>,
     emitter: Arc<RecordingEmitter>,
     user_emitter: Arc<RecordingUserEmitter>,
+    blobs: MemBlobStore,
 }
 
 impl Harness {
@@ -714,6 +902,7 @@ impl Harness {
         let clock = Arc::new(ManualClock::new(domain::id::EPOCH_MS + 1));
         let emitter = Arc::new(RecordingEmitter::default());
         let user_emitter = Arc::new(RecordingUserEmitter::default());
+        let blobs = MemBlobStore::default();
         let state = AppState::new(
             Arc::clone(&store),
             Arc::clone(&keys),
@@ -723,8 +912,9 @@ impl Harness {
             clock.clone() as Arc<dyn Clock>,
             Arc::clone(&emitter) as Arc<dyn domain::emit::RealmEmitter>,
             Arc::clone(&user_emitter) as Arc<dyn domain::emit::UserEmitter>,
+            Arc::new(blobs.clone()) as Arc<dyn domain::blob::BlobStore>,
         );
-        Self { router: rest_api::router(state), keys, pow, store, snow, clock, emitter, user_emitter }
+        Self { router: rest_api::router(state), keys, pow, store, snow, clock, emitter, user_emitter, blobs }
     }
 
     /// 기록된 Realm emit 이벤트 이름 목록 (검증용).
@@ -763,6 +953,42 @@ impl Harness {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, val)
+    }
+
+    /// 멀티파트 파일 업로드 (한 파일 필드 "file").
+    async fn upload(&self, uri: &str, token: &str, filename: &str, ct: &str, data: &[u8]) -> (StatusCode, Value) {
+        let boundary = "X-TEST-BOUNDARY-9z";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {ct}\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(data);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+            .body(Body::from(body))
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// 원시 바이트 GET (다운로드 검증용).
+    async fn get_bytes(&self, uri: &str, token: &str) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, bytes.to_vec())
     }
 }
 
@@ -1422,4 +1648,249 @@ async fn read_state_ack_and_mention_recount() {
     // 존재하지 않는 메시지 ack → 404.
     let (st, _) = h.req("POST", &format!("/channels/{chan}/messages/999999/ack"), Some(&bob), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ── 스레드 / 포럼 (Phase 4) ────────────────────────────────────────────
+
+#[tokio::test]
+async fn thread_create_list_archive_and_forum_channel() {
+    let h = Harness::new();
+    let owner_id = h.user("th_owner");
+    let owner = h.token(owner_id);
+    let (gid, general) = make_guild(&h, &owner).await;
+
+    // 포럼 채널 생성 (kind=forum).
+    let (st, f) = h.req("POST", &format!("/guilds/{gid}/channels"), Some(&owner), Some(json!({"name":"help","kind":"forum"}))).await;
+    assert_eq!(st, StatusCode::CREATED, "forum: {f}");
+    assert_eq!(f["kind"], "forum");
+
+    // 잘못된 kind → 400.
+    let (st, _) = h.req("POST", &format!("/guilds/{gid}/channels"), Some(&owner), Some(json!({"name":"x","kind":"thread"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "thread는 채널 생성으로 불가");
+
+    // bob 합류(멤버, default_everyone에 CREATE_PUBLIC_THREADS 포함).
+    let bob_id = h.user("th_bob");
+    let bob = h.token(bob_id);
+    h.store.add_member(RealmId(Snowflake::from_raw(gid.parse().unwrap())), UserId(Snowflake::from_raw(bob_id))).await.unwrap();
+
+    // bob이 general 아래 스레드 생성 → 201 + THREAD_CREATE.
+    let (st, t) = h.req("POST", &format!("/channels/{general}/threads"), Some(&bob), Some(json!({"name":"discussion"}))).await;
+    assert_eq!(st, StatusCode::CREATED, "thread: {t}");
+    let tid = t["id"].as_str().unwrap().to_string();
+    assert_eq!(t["parent_id"], general);
+    assert_eq!(t["owner_id"], bob_id.to_string());
+    assert!(!t["archived"].as_bool().unwrap());
+    assert!(h.emitted().contains(&"THREAD_CREATE".to_string()));
+
+    // 목록.
+    let (st, list) = h.req("GET", &format!("/channels/{general}/threads"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // 비멤버는 생성 403.
+    let outsider = h.token(h.user("th_out"));
+    let (st, _) = h.req("POST", &format!("/channels/{general}/threads"), Some(&outsider), Some(json!({"name":"x"}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 아카이브: 소유자(bob) → 200 + THREAD_UPDATE + archived.
+    let (st, u) = h.req("PATCH", &format!("/channels/{tid}/thread"), Some(&bob), Some(json!({"archived":true}))).await;
+    assert_eq!(st, StatusCode::OK, "archive: {u}");
+    assert!(u["archived"].as_bool().unwrap());
+    assert!(h.emitted().contains(&"THREAD_UPDATE".to_string()));
+
+    // 제3자(멤버지만 비소유·MANAGE_THREADS 없음? — default엔 MANAGE_THREADS 없음) 아카이브 → 403.
+    let carol_id = h.user("th_carol");
+    let carol = h.token(carol_id);
+    h.store.add_member(RealmId(Snowflake::from_raw(gid.parse().unwrap())), UserId(Snowflake::from_raw(carol_id))).await.unwrap();
+    let (st, _) = h.req("PATCH", &format!("/channels/{tid}/thread"), Some(&carol), Some(json!({"archived":false}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "비소유·MANAGE_THREADS 없음 → 거부");
+
+    // owner(길드 소유자=권한 단축)는 아카이브 가능.
+    let (st, _) = h.req("PATCH", &format!("/channels/{tid}/thread"), Some(&owner), Some(json!({"archived":false}))).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+// ── 감사 로그 (Phase 4) ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn audit_log_records_and_lists() {
+    let h = Harness::new();
+    let owner_id = h.user("al_owner");
+    let owner = h.token(owner_id);
+    let (gid, _chan) = make_guild(&h, &owner).await;
+
+    // 채널 생성 → ChannelCreate(10), 역할 생성 → RoleCreate(30) 감사 기록.
+    h.req("POST", &format!("/guilds/{gid}/channels"), Some(&owner), Some(json!({"name":"ops"}))).await;
+    h.req("POST", &format!("/guilds/{gid}/roles"), Some(&owner), Some(json!({"name":"mod","permissions":0}))).await;
+
+    // owner(소유자=VIEW_AUDIT_LOG 포함)는 조회 가능. 최신순(역할이 먼저).
+    let (st, logs) = h.req("GET", &format!("/guilds/{gid}/audit-logs"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK, "audit: {logs}");
+    let arr = logs.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["action_type"], 30, "최신 = RoleCreate");
+    assert_eq!(arr[1]["action_type"], 10, "ChannelCreate");
+    assert_eq!(arr[0]["changes"]["name"], "mod");
+
+    // 일반 멤버(VIEW_AUDIT_LOG 없음)는 403.
+    let bob = h.token(h.user("al_bob"));
+    h.store.add_member(RealmId(Snowflake::from_raw(gid.parse().unwrap())), UserId(Snowflake::from_raw(h.keys.verify_access(&bob).unwrap()))).await.unwrap();
+    let (st, _) = h.req("GET", &format!("/guilds/{gid}/audit-logs"), Some(&bob), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+// ── 웹훅 (Phase 4) ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn webhook_create_execute_and_permissions() {
+    let h = Harness::new();
+    let owner_id = h.user("wh_owner");
+    let owner = h.token(owner_id);
+    let (_gid, chan) = make_guild(&h, &owner).await;
+
+    // owner(소유자=권한 단축, MANAGE_WEBHOOKS) 생성 → 토큰 1회 반환.
+    let (st, w) = h.req("POST", &format!("/channels/{chan}/webhooks"), Some(&owner), Some(json!({"name":"ci"}))).await;
+    assert_eq!(st, StatusCode::CREATED, "webhook: {w}");
+    let wid = w["id"].as_str().unwrap().to_string();
+    let token = w["token"].as_str().unwrap().to_string();
+
+    // 목록엔 토큰 노출 안 됨.
+    let (st, list) = h.req("GET", &format!("/channels/{chan}/webhooks"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert!(list[0]["token"].is_null());
+
+    // 일반 멤버(MANAGE_WEBHOOKS 없음)는 생성/목록 403.
+    let bob = h.token(h.user("wh_bob"));
+    h.store.add_member(RealmId(Snowflake::from_raw(_gid.parse().unwrap())), UserId(Snowflake::from_raw(h.keys.verify_access(&bob).unwrap()))).await.unwrap();
+    let (st, _) = h.req("GET", &format!("/channels/{chan}/webhooks"), Some(&bob), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 실행(Bearer 없음, URL 토큰) → 200 + MESSAGE_CREATE emit + 메시지 적재.
+    let (st, ex) = h.req("POST", &format!("/webhooks/{wid}/{token}"), None, Some(json!({"content":"hello from CI"}))).await;
+    assert_eq!(st, StatusCode::OK, "execute: {ex}");
+    assert!(h.emitted().contains(&"MESSAGE_CREATE".to_string()));
+
+    // 틀린 토큰 → 401.
+    let (st, _) = h.req("POST", &format!("/webhooks/{wid}/deadbeef"), None, Some(json!({"content":"x"}))).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // 빈 내용 → 400.
+    let (st, _) = h.req("POST", &format!("/webhooks/{wid}/{token}"), None, Some(json!({"content":"  "}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // 삭제(MANAGE_WEBHOOKS) → 204, 이후 실행 404.
+    let (st, _) = h.req("DELETE", &format!("/webhooks/{wid}"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = h.req("POST", &format!("/webhooks/{wid}/{token}"), None, Some(json!({"content":"after delete"}))).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ── 첨부 (D37, 로컬 FS) ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn attachment_upload_download_and_permissions() {
+    let h = Harness::new();
+    let owner_id = h.user("at_owner");
+    let owner = h.token(owner_id);
+    let (gid, chan) = make_guild(&h, &owner).await;
+    let mid = seed_message(&h, &chan, &gid, owner_id, "with file").await;
+
+    // owner(작성자) 업로드 → 201 + 메타.
+    let (st, a) = h.upload(&format!("/channels/{chan}/messages/{mid}/attachments"), &owner, "hello.txt", "text/plain", b"hello bytes").await;
+    assert_eq!(st, StatusCode::CREATED, "upload: {a}");
+    let aid = a["id"].as_str().unwrap().to_string();
+    assert_eq!(a["filename"], "hello.txt");
+    assert_eq!(a["size_bytes"], 11);
+    assert_eq!(a["url"], format!("/attachments/{aid}"));
+    // 바이트가 BlobStore에 저장됨.
+    assert_eq!(h.blobs.blobs.lock().unwrap().get(&aid).map(|v| v.len()), Some(11));
+
+    // 목록 → 1.
+    let (st, list) = h.req("GET", &format!("/channels/{chan}/messages/{mid}/attachments"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // 다운로드 → 바이트 일치.
+    let (st, bytes) = h.get_bytes(&format!("/attachments/{aid}"), &owner).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(bytes, b"hello bytes");
+
+    // 비작성자(멤버) 업로드 → 403.
+    let bob_id = h.user("at_bob");
+    let bob = h.token(bob_id);
+    h.store.add_member(RealmId(Snowflake::from_raw(gid.parse().unwrap())), UserId(Snowflake::from_raw(bob_id))).await.unwrap();
+    let (st, _) = h.upload(&format!("/channels/{chan}/messages/{mid}/attachments"), &bob, "x.txt", "text/plain", b"x").await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 비멤버 다운로드 → 403.
+    let outsider = h.token(h.user("at_out"));
+    let (st, _) = h.get_bytes(&format!("/attachments/{aid}"), &outsider).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 없는 첨부 다운로드 → 404.
+    let (st, _) = h.get_bytes("/attachments/999999", &owner).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ── 전문검색 (Q10, FTS) ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn search_matches_and_channel_permission_filter() {
+    let h = Harness::new();
+    let owner_id = h.user("se_owner");
+    let owner = h.token(owner_id);
+    let (gid, general) = make_guild(&h, &owner).await;
+
+    // 둘째 채널 'secret' 생성.
+    let (st, c) = h.req("POST", &format!("/guilds/{gid}/channels"), Some(&owner), Some(json!({"name":"secret"}))).await;
+    assert_eq!(st, StatusCode::CREATED, "channel: {c}");
+    let secret = c["id"].as_str().unwrap().to_string();
+
+    // 메시지 시드: general에 "fox", secret에 "fox".
+    seed_message(&h, &general, &gid, owner_id, "the quick brown fox").await;
+    seed_message(&h, &general, &gid, owner_id, "lazy dog sleeps").await;
+    seed_message(&h, &secret, &gid, owner_id, "secret fox lives here").await;
+
+    // owner(소유자=권한 단축) 검색 "fox" → 양 채널 2건.
+    let (st, hits) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=fox"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK, "search: {hits}");
+    assert_eq!(hits.as_array().unwrap().len(), 2);
+
+    // 매칭 없음 → 빈 결과.
+    let (st, none) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=elephant"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(none.as_array().unwrap().len(), 0);
+
+    // 빈 검색어 → 400.
+    let (st, _) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=%20"), Some(&owner), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // bob 합류(멤버, 비소유자).
+    let bob_id = h.user("se_bob");
+    let bob = h.token(bob_id);
+    h.store.add_member(RealmId(Snowflake::from_raw(gid.parse().unwrap())), UserId(Snowflake::from_raw(bob_id))).await.unwrap();
+
+    // secret 채널에 @everyone VIEW_CHANNEL deny 오버라이드 (target = @everyone = realm id).
+    let (st, _) = h
+        .req(
+            "PUT",
+            &format!("/channels/{secret}/permissions/{gid}"),
+            Some(&owner),
+            Some(json!({ "type": "role", "allow": 0, "deny": Permissions::VIEW_CHANNEL.bits() })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // bob 검색 "fox" → secret은 VIEW_CHANNEL 없어 제외, general 1건만.
+    let (st, bob_hits) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=fox"), Some(&bob), None).await;
+    assert_eq!(st, StatusCode::OK, "bob search: {bob_hits}");
+    let arr = bob_hits.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "secret 채널은 권한 필터로 제외");
+    assert_eq!(arr[0]["channel_id"], general);
+
+    // 비멤버 → 403.
+    let outsider = h.token(h.user("se_out"));
+    let (st, _) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=fox"), Some(&outsider), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
 }

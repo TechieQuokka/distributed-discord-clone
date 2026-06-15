@@ -3,6 +3,9 @@
 //! 개념 단위 디렉터리/모듈 분리 (CLAUDE.md R6).
 //! 엔티티(user/guild/channel/message/role/member/realm 등)는 구현되며 각자 디렉터리로 추가된다.
 
+pub mod attachment;
+pub mod audit;
+pub mod blob;
 pub mod channel;
 pub mod dm;
 pub mod emit;
@@ -19,4 +22,6 @@ pub mod refresh_token;
 pub mod relationship;
 pub mod repo;
 pub mod role;
+pub mod thread;
 pub mod user;
+pub mod webhook;
