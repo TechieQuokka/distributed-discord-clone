@@ -6,15 +6,21 @@
 
 use std::sync::Arc;
 
-use auth::TokenKeys;
+use auth::{PowKeys, TokenKeys};
 use domain::emit::{RealmEmitter, UserEmitter};
 use domain::id::SnowflakeGenerator;
 use domain::repo::Store;
 use node::clock::Clock;
 
+use crate::ratelimit::RateLimiter;
+
 pub struct AppState<S: Store> {
     pub store: Arc<S>,
     pub keys: Arc<TokenKeys>,
+    /// 가입 봇방지 PoW 챌린지 키 (D18). 멀티노드 공유(`POW_SECRET`).
+    pub pow: Arc<PowKeys>,
+    /// per-node Rate limiter (D32, 휘발 DB-D5). REST 미들웨어가 사용.
+    pub ratelimit: Arc<RateLimiter>,
     pub snowflakes: Arc<SnowflakeGenerator>,
     pub clock: Arc<dyn Clock>,
     /// Realm 단위 실시간 이벤트 포트 (D39) — 멤버 변동 등을 구독자표로 팬아웃. server가 Router를 주입.
@@ -29,6 +35,8 @@ impl<S: Store> Clone for AppState<S> {
         Self {
             store: Arc::clone(&self.store),
             keys: Arc::clone(&self.keys),
+            pow: Arc::clone(&self.pow),
+            ratelimit: Arc::clone(&self.ratelimit),
             snowflakes: Arc::clone(&self.snowflakes),
             clock: Arc::clone(&self.clock),
             emitter: Arc::clone(&self.emitter),
@@ -38,15 +46,18 @@ impl<S: Store> Clone for AppState<S> {
 }
 
 impl<S: Store> AppState<S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<S>,
         keys: Arc<TokenKeys>,
+        pow: Arc<PowKeys>,
+        ratelimit: Arc<RateLimiter>,
         snowflakes: Arc<SnowflakeGenerator>,
         clock: Arc<dyn Clock>,
         emitter: Arc<dyn RealmEmitter>,
         user_emitter: Arc<dyn UserEmitter>,
     ) -> Self {
-        Self { store, keys, snowflakes, clock, emitter, user_emitter }
+        Self { store, keys, pow, ratelimit, snowflakes, clock, emitter, user_emitter }
     }
 
     /// 현재 시각(unix seconds) — refresh 만료/검증용.

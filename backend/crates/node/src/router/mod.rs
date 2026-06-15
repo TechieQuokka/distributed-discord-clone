@@ -128,6 +128,12 @@ impl<T: NodeTransport> Router<T> {
         }
     }
 
+    /// 특정 노드 1개에 타깃 전송 (D43 크로스노드 유저 배달 등). 전송 실패는 무시(fire-and-forget).
+    /// broadcast와 달리 호스팅 노드에만 보낼 때 쓴다(수신자가 특정 유저).
+    pub async fn send_to(&self, node: u64, msg: NodeMessage) {
+        let _ = self.transport.send(node, msg).await;
+    }
+
     /// 구독 라우팅 (D12).
     pub async fn route_subscribe(
         &self,
@@ -360,6 +366,8 @@ impl<T: NodeTransport> Router<T> {
             // presence gossip은 server inbound 루프가 gateway::presence로 직접 처리(Store+Hub 필요).
             // 여기 도달하면(직접 호출 등) 무시 — node 코어는 friend/Hub를 모름(P2).
             NodeMessage::PresenceGossip { .. } => Ok(None),
+            // UserDeliver(D43)도 server inbound 루프가 직접 처리(Hub 필요) — node 코어는 Hub를 모름(P2).
+            NodeMessage::UserDeliver { .. } => Ok(None),
             NodeMessage::Pong | NodeMessage::Hello { .. } | NodeMessage::HelloAck { .. } => Ok(None),
         }
     }

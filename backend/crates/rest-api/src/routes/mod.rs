@@ -15,7 +15,7 @@ use domain::repo::Store;
 
 use crate::state::AppState;
 
-/// 전체 REST 라우터 (state 주입 완료).
+/// 전체 REST 라우터 (state 주입 완료). Rate limit 미들웨어(D32)를 전 라우트에 적용.
 pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
     axum::Router::new()
         .merge(auth::routes::<S>())
@@ -28,5 +28,6 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(role::routes::<S>())
         .merge(channel::routes::<S>())
         .merge(message::routes::<S>())
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::ratelimit::rate_limit::<S>))
         .with_state(state)
 }

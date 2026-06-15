@@ -59,6 +59,26 @@ impl UserRepository for PgStore {
         .map_err(map_err)?;
         Ok(row.as_ref().map(row_to_user))
     }
+
+    async fn set_totp_secret(&self, id: UserId, secret: Option<&[u8]>) -> Result<(), RepoError> {
+        sqlx::query("UPDATE users SET mfa_totp_secret = $2 WHERE id = $1")
+            .bind(id.0.raw() as i64)
+            .bind(secret)
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn totp_secret(&self, id: UserId) -> Result<Option<Vec<u8>>, RepoError> {
+        let row =
+            sqlx::query("SELECT mfa_totp_secret FROM users WHERE id = $1 AND deleted_at IS NULL")
+                .bind(id.0.raw() as i64)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_err)?;
+        Ok(row.and_then(|r| r.get::<Option<Vec<u8>>, _>("mfa_totp_secret")))
+    }
 }
 
 #[cfg(test)]

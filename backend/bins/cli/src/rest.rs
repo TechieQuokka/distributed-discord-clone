@@ -74,12 +74,30 @@ struct RegisterBody<'a> {
     username: &'a str,
     email: &'a str,
     password: &'a str,
+    pow_challenge: String,
+    pow_nonce: String,
 }
 
+#[derive(Deserialize)]
+struct PowChallenge {
+    challenge: String,
+    difficulty: u8,
+}
+
+/// 가입: ① PoW 챌린지 받기 → ② 풀기(auth crate와 동일 알고리즘) → ③ 해를 실어 등록 (D18).
 pub async fn register(base: &str, username: &str, email: &str, password: &str) -> Result<AuthResponse, String> {
+    let ch: PowChallenge = ok_json(
+        client()
+            .get(format!("{base}/auth/pow-challenge"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .await?;
+    let pow_nonce = auth::pow::solve(&ch.challenge, ch.difficulty);
     let res = client()
         .post(format!("{base}/auth/register"))
-        .json(&RegisterBody { username, email, password })
+        .json(&RegisterBody { username, email, password, pow_challenge: ch.challenge, pow_nonce })
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -92,10 +110,78 @@ struct LoginBody<'a> {
     password: &'a str,
 }
 
-pub async fn login(base: &str, username: &str, password: &str) -> Result<AuthResponse, String> {
+/// 로그인 결과: 토큰 발급 또는 MFA 2단계 필요 (D19).
+pub enum LoginOutcome {
+    Tokens(AuthResponse),
+    MfaRequired,
+}
+
+pub async fn login(base: &str, username: &str, password: &str) -> Result<LoginOutcome, String> {
     let res = client()
         .post(format!("{base}/auth/login"))
         .json(&LoginBody { username, password })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("{status}: {}", res.text().await.unwrap_or_default()));
+    }
+    let v: serde_json::Value = res.json().await.map_err(|e| format!("decode: {e}"))?;
+    if v.get("mfa_required").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(LoginOutcome::MfaRequired)
+    } else {
+        serde_json::from_value(v).map(LoginOutcome::Tokens).map_err(|e| format!("decode: {e}"))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MfaEnableView {
+    pub secret: String,
+    pub otpauth_uri: String,
+}
+
+#[derive(Serialize)]
+struct MfaVerifyBody<'a> {
+    secret: &'a str,
+    code: &'a str,
+}
+
+#[derive(Serialize)]
+struct MfaLoginBody<'a> {
+    username: &'a str,
+    password: &'a str,
+    code: &'a str,
+}
+
+/// MFA enable: secret(hex) + otpauth URI 수령 (아직 미저장).
+pub async fn mfa_enable(base: &str, token: &str) -> Result<MfaEnableView, String> {
+    let res = client()
+        .post(format!("{base}/auth/mfa/totp/enable"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(res).await
+}
+
+/// MFA verify: secret+code 확인 → 저장(활성화).
+pub async fn mfa_verify(base: &str, token: &str, secret: &str, code: &str) -> Result<(), String> {
+    let res = client()
+        .post(format!("{base}/auth/mfa/totp/verify"))
+        .bearer_auth(token)
+        .json(&MfaVerifyBody { secret, code })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(res).await
+}
+
+/// MFA 로그인 2단계: 비번 + TOTP 코드 → 토큰.
+pub async fn mfa_login(base: &str, username: &str, password: &str, code: &str) -> Result<AuthResponse, String> {
+    let res = client()
+        .post(format!("{base}/auth/mfa/totp"))
+        .json(&MfaLoginBody { username, password, code })
         .send()
         .await
         .map_err(|e| e.to_string())?;

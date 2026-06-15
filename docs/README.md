@@ -9,7 +9,7 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 
 | 순서 | 문서 | 내용 |
 |---|---|---|
-| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D42)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
+| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D43)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
 | - | [design-discussion.md](design-discussion.md) | **설계 토론 기록** — 어떤 선택지를 두고 어떻게 논쟁해 정했나 (서사) |
 | 2 | [database/01-overview.md](database/01-overview.md) | DB 철학·규약·핵심 모델링 결정 |
 | 3 | [database/02-schema.md](database/02-schema.md) | 전체 테이블 DDL (도메인별) |
@@ -61,4 +61,4 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 비범위(명시): 합의(Raft) 없음, Voice 미디어 없음
 ```
 
-> 현재 단계: **Phase 3 (Discord 본체) 진행 중** — 초대·역할/권한·채널 오버라이드·멤버 관리·메시지(편집/삭제/리액션/답장/멘션) 완료. 다음: DM/그룹DM. (이어서 → [RESUME.md](../RESUME.md))
+> 현재 단계: **Phase 3 완료 + Phase 4 진행** — Phase 3(…·크로스노드 유저 라우팅 D43) 완료, **Phase 4 인증/봇방지 묶음: PoW(D18)·rate limit(D32)·TOTP MFA(D19)** 완료. 다음: 스레드/검색·파일첨부·파티셔닝(D28) 등. (이어서 → [RESUME.md](../RESUME.md))

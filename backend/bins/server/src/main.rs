@@ -27,6 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, pk) = TokenKeys::generate()?.export_hex();
         println!("PASETO_SECRET={sk}");
         println!("PASETO_PUBLIC={pk}");
+        // PoW 챌린지 서명 키 (D18) — 멀티노드는 공유 필수(PASETO와 동일).
+        println!("POW_SECRET={}", auth::PowKeys::generate()?.export_hex());
         return Ok(());
     }
 
@@ -68,6 +70,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TokenKeys::generate()?
         }
     });
+    // PoW 챌린지 키 (D18): 멀티노드는 모든 노드가 **공유 키**(POW_SECRET)여야 한 노드 발급 챌린지를
+    // 다른 노드가 검증 가능(stateless, DB-D5). 없으면 생성(단일노드는 발급/검증이 같은 프로세스).
+    let pow = Arc::new(match std::env::var("POW_SECRET") {
+        Ok(s) => auth::PowKeys::import_hex(&s)?,
+        Err(_) => {
+            if cluster.is_some() {
+                tracing::warn!("멀티노드인데 POW_SECRET 미지정 — 노드 간 PoW 챌린지 검증 실패 가능");
+            }
+            auth::PowKeys::generate()?
+        }
+    });
+    // per-node Rate limiter (D32, 휘발 DB-D5) — 노드마다 독립 버킷(분산 근사). 기본 규칙 적용.
+    let ratelimit = Arc::new(rest_api::RateLimiter::with_defaults());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 
     // 분산 코어: 링(클러스터의 모든 노드) + raw-TCP+mTLS 전송(D3/D16).
@@ -135,14 +150,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // REST(auth/guild/history) 라우터. Router를 Realm emit 포트(D39, 멤버 변동 팬아웃),
-    // Hub를 유저 emit 포트(친구·차단 통지)로 주입.
+    // UserRouter를 유저 emit 포트(친구·차단·읽음 통지)로 주입 — 크로스노드 타깃 배달(D43).
+    let user_router = gateway::UserRouter::new(hub.clone(), Arc::clone(&presence), Arc::clone(&router), node_id);
     let rest = rest_api::router(AppState::new(
         Arc::clone(&store),
         Arc::clone(&keys),
+        Arc::clone(&pow),
+        Arc::clone(&ratelimit),
         Arc::clone(&snowflakes),
         Arc::clone(&clock),
         Arc::clone(&router) as Arc<dyn domain::emit::RealmEmitter>,
-        Arc::new(hub.clone()) as Arc<dyn domain::emit::UserEmitter>,
+        Arc::new(user_router) as Arc<dyn domain::emit::UserEmitter>,
     ));
 
     // Gateway(WS + 메시지 전송) 라우터.
@@ -181,6 +199,10 @@ async fn run_inbound(
             // 전역 presence gossip(Q11/D12): view 갱신 + 그 유저의 로컬 친구에게 PRESENCE_UPDATE 배달.
             protocol::NodeMessage::PresenceGossip { user_id, node_id, status } => {
                 gateway::presence::apply_gossip(&presence, &hub, &*store, user_id, node_id, status).await;
+            }
+            // 크로스노드 유저 이벤트 타깃 배달(D43): 이 노드의 로컬 세션에 흘린다.
+            protocol::NodeMessage::UserDeliver { t, payload, user_ids } => {
+                gateway::deliver_user(&hub, t, payload, &user_ids).await;
             }
             _ => match router.handle_inbound(inbound).await {
                 Ok(Some(delivery)) => gateway::deliver_local(&hub, &delivery).await,

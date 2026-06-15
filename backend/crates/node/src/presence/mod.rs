@@ -95,6 +95,17 @@ impl Presence {
         self.inner.lock().unwrap().get(&user).map(|e| e.effective()).unwrap_or(Status::Offline)
     }
 
+    /// 이 유저를 호스팅하는 노드 집합 (D43 크로스노드 유저 라우팅 디렉터리).
+    /// 오프라인(어느 노드에도 세션 없음)이면 빈 Vec. 유저 위치 조회의 단일 출처.
+    pub fn nodes_for(&self, user: u64) -> Vec<u64> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(&user)
+            .map(|e| e.nodes.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     pub fn is_online(&self, user: u64) -> bool {
         self.get(user) != Status::Offline
     }
@@ -114,6 +125,21 @@ mod tests {
         assert!(p.clear(1, 10), "online→offline 전이");
         assert!(!p.is_online(1));
         assert!(!p.clear(1, 10), "이미 offline → 변화 없음");
+    }
+
+    #[test]
+    fn nodes_for_tracks_hosting_directory() {
+        let p = Presence::new();
+        assert!(p.nodes_for(1).is_empty(), "오프라인 유저는 호스팅 노드 없음");
+        p.set(1, 10, Status::Online);
+        p.set(1, 20, Status::Online);
+        let mut nodes = p.nodes_for(1);
+        nodes.sort();
+        assert_eq!(nodes, vec![10, 20], "두 노드가 이 유저를 호스팅");
+        p.clear(1, 10);
+        assert_eq!(p.nodes_for(1), vec![20], "노드 하나 빠지면 디렉터리에서 제거");
+        p.clear(1, 20);
+        assert!(p.nodes_for(1).is_empty(), "전부 빠지면 오프라인=빈 디렉터리");
     }
 
     #[test]

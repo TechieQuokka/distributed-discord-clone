@@ -80,7 +80,7 @@ offset  size  field
 |---|---|
 | `0x00xx` | 제어/핸드셰이크 |
 | `0x01xx` | Realm 라우팅/팬아웃 |
-| `0x02xx` | Presence/gossip |
+| `0x02xx` | Presence/gossip + 클러스터 유저 라우팅 |
 | `0x03xx` | 클러스터/링 |
 
 | msg_type | 이름 | 방향 | 설명 |
@@ -96,6 +96,7 @@ offset  size  field
 | 0x0110 | `SUBSCRIBE` | →소유노드 | 유저 U(노드 N)가 Realm R 구독 등록 (D12) |
 | 0x0111 | `UNSUBSCRIBE` | →소유노드 | 구독 해제 |
 | 0x0201 | `PRESENCE_GOSSIP` | 양방향 | presence 델타 전파 (Phase 3, D12) |
+| 0x0202 | `USER_DELIVER` | →호스팅 노드 | Realm 무관 유저 이벤트(친구·읽음 등)를 대상 유저 호스팅 노드에 **타깃** 배달 (D43) |
 | 0x0301 | `RING_UPDATE` | 양방향 | 해시링 멤버십 변경 (Phase 5 동적, gossip) |
 
 ---
@@ -146,6 +147,14 @@ node_id : u64     # 이 유저를 호스팅(해제)한 노드
 status  : u8      # user_status: 0=offline 1=online 2=idle 3=dnd
 ```
 - 전역 presence 델타. 전이(첫/마지막 live 세션) 시 **모든 피어에 broadcast**(풀메시 D4). 수신 노드는 view 갱신 후 그 유저의 **로컬 친구**(relationships, D40)에게 `PRESENCE_UPDATE`(gateway JSON) 배달하고 **재브로드캐스트하지 않는다**(원본이 이미 전 피어 전송 → 루프 방지). Realm 무관 유저 라우팅 = D40/D41의 크로스노드 seam 해소.
+
+### `USER_DELIVER` (0x0202) — 구현됨 (Phase 3, D43)
+```
+t        : String     # DISPATCH 이벤트 이름 (RELATIONSHIP_ADD / MESSAGE_ACK …)
+payload  : String     # 클라에 나갈 JSON(불투명, 하위 계층 파싱 안 함 — D39와 동일)
+user_ids : Vec<u64>   # 이 수신 노드에서 배달할 대상 유저들
+```
+- **Realm 무관 유저 이벤트**(친구·차단·읽음)의 크로스노드 배달. presence와 달리 **broadcast가 아니라 타깃 전송**: 송신 노드가 `Presence` 디렉터리(D42, user→호스팅 노드 집합)로 각 대상 유저의 호스팅 노드를 찾아 **그 노드에만** 보낸다(로컬 노드는 `Hub`로 직접 배달). 수신 노드는 `user_ids`를 자기 로컬 세션에 `PRESENCE_GOSSIP`과 같은 자리(server inbound 루프)에서 `Hub::deliver`로 흘린다. 로컬 세션 없는 유저는 자동 스킵(stale 디렉터리 무해).
 
 ### `REALM_COMMAND_RESULT` (0x0102)
 ```
