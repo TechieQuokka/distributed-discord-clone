@@ -4,9 +4,11 @@
 //! (repo trait가 RPITIT라 dyn 불가하나, Store 통합으로 제네릭 폭발은 회피).
 //! Snowflake generator는 노드당 1개를 server가 소유해 주입(D11) — Router와 동일 인스턴스.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use auth::{PowKeys, TokenKeys};
+use auth::webauthn::{PasskeyAuthentication, PasskeyRegistration};
+use auth::{PowKeys, TokenKeys, WebauthnService};
 use domain::blob::BlobStore;
 use domain::emit::{RealmEmitter, UserEmitter};
 use domain::id::SnowflakeGenerator;
@@ -14,6 +16,15 @@ use domain::repo::Store;
 use node::clock::Clock;
 
 use crate::ratelimit::RateLimiter;
+
+/// 진행 중 WebAuthn ceremony 상태 (D19, 휘발 DB-D5). start→finish 사이 서버측 보관(위변조 차단).
+pub enum Ceremony {
+    Register { user_id: u64, state: Box<PasskeyRegistration> },
+    Auth { user_id: u64, state: Box<PasskeyAuthentication> },
+}
+
+/// ceremony_id → (상태, 만료 ms). 인메모리 — 멀티노드는 finish가 start한 노드로(seam).
+pub type CeremonyStore = Arc<Mutex<HashMap<u64, (Ceremony, u64)>>>;
 
 pub struct AppState<S: Store> {
     pub store: Arc<S>,
@@ -30,6 +41,10 @@ pub struct AppState<S: Store> {
     pub user_emitter: Arc<dyn UserEmitter>,
     /// 첨부 바이트 저장소 (D37) — server가 LocalFsBlobStore 주입. 메타는 store(AttachmentRepository).
     pub blobs: Arc<dyn BlobStore>,
+    /// WebAuthn 서버 (D19). env로 RP 구성된 노드만 `Some` — 없으면 webauthn 엔드포인트 404.
+    pub webauthn: Option<Arc<WebauthnService>>,
+    /// 진행 중 ceremony 상태 (휘발, DB-D5).
+    pub ceremonies: CeremonyStore,
 }
 
 // Arc만 복제 (derive(Clone)은 S:Clone를 요구하므로 수동 구현).
@@ -45,6 +60,8 @@ impl<S: Store> Clone for AppState<S> {
             emitter: Arc::clone(&self.emitter),
             user_emitter: Arc::clone(&self.user_emitter),
             blobs: Arc::clone(&self.blobs),
+            webauthn: self.webauthn.clone(),
+            ceremonies: Arc::clone(&self.ceremonies),
         }
     }
 }
@@ -61,8 +78,21 @@ impl<S: Store> AppState<S> {
         emitter: Arc<dyn RealmEmitter>,
         user_emitter: Arc<dyn UserEmitter>,
         blobs: Arc<dyn BlobStore>,
+        webauthn: Option<Arc<WebauthnService>>,
     ) -> Self {
-        Self { store, keys, pow, ratelimit, snowflakes, clock, emitter, user_emitter, blobs }
+        Self {
+            store,
+            keys,
+            pow,
+            ratelimit,
+            snowflakes,
+            clock,
+            emitter,
+            user_emitter,
+            blobs,
+            webauthn,
+            ceremonies: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// 현재 시각(unix seconds) — refresh 만료/검증용.

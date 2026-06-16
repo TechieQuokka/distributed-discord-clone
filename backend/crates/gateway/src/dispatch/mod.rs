@@ -86,6 +86,23 @@ pub async fn run_dispatch<S: Store + 'static, T: NodeTransport>(
                         continue;
                     }
                 }
+                // 이벤트 소싱(D48): 메시지 생성 사실을 append-only 로그에 기록. 단일 직렬 소비자(D24)라
+                // per-realm seq 경합 없음. 로그는 messages(엔티티 진실)와 별개의 사실 스트림(CQRS).
+                // append 실패는 warn하고 계속(배달은 막지 않음 — messages가 진실, 로그는 보조). seam: 완전
+                // 무결성은 persist와 한 트랜잭션(후속).
+                if let Err(e) = store
+                    .append_event(
+                        realm,
+                        &domain::event::RealmEventKind::MessageCreated {
+                            message_id,
+                            channel_id,
+                            author,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "event log append failed (continuing)");
+                }
                 // (2) 멘션 파싱(content 파생, D39) → 적재. 존재 유저만(어댑터 보장).
                 let mentions = domain::mention::parse_mentions(&content);
                 if let Err(e) = store.add_mentions(message_id, &mentions).await {

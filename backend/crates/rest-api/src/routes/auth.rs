@@ -67,7 +67,7 @@ pub struct RefreshReq {
 
 /// id는 Snowflake라 JS 안전정수를 넘으므로 **문자열**로 직렬화 (Discord 관례).
 #[derive(Serialize)]
-pub struct AuthResponse {
+pub(crate) struct AuthResponse {
     pub user_id: String,
     pub access_token: String,
     pub refresh_token: String,
@@ -266,8 +266,8 @@ async fn refresh<S: Store + 'static>(
     }
 }
 
-/// access(PASETO) 발급 + refresh(opaque) 생성·저장 → 응답.
-async fn issue_tokens<S: Store + 'static>(
+/// access(PASETO) 발급 + refresh(opaque) 생성·저장 → 응답. (webauthn 로그인 등에서도 재사용)
+pub(crate) async fn issue_tokens<S: Store + 'static>(
     st: &AppState<S>,
     user_id: UserId,
     rotated_from: Option<RefreshTokenId>,

@@ -10,6 +10,8 @@ pub mod op {
     pub const DISPATCH: u8 = 0;
     pub const HEARTBEAT: u8 = 1;
     pub const IDENTIFY: u8 = 2;
+    /// 클라 → 서버: 상태 변경(online/idle/dnd). D42 presence idle/dnd seam.
+    pub const PRESENCE_UPDATE: u8 = 3;
     pub const RESUME: u8 = 6;
     pub const INVALID_SESSION: u8 = 9;
     pub const HELLO: u8 = 10;

@@ -24,8 +24,13 @@ pub struct NodeConfig {
     pub id: u64,
     /// Snowflake worker id (D29), 0..=1023.
     pub worker_id: u16,
-    /// 노드 간 raw TCP 리슨 주소 (Phase 2).
+    /// 노드 간 raw TCP 리슨 주소 (Phase 2). SWIM(D45)에선 피어가 dial할 advertise 주소이기도 함.
     pub listen_addr: String,
+    /// **동적 합류 모드(D45)**: true면 `peers`를 정적 풀메시가 아니라 **seed(introducer)**로 취급 —
+    /// 이 노드가 seed에 `SwimJoin`을 보내 클러스터에 합류하고, 나머지 노드는 SWIM gossip으로 발견·dial.
+    /// false(기본)면 기존 정적 풀메시(작은 id가 큰 id에게 dial, D4 §6) + SWIM 유지.
+    #[serde(default)]
+    pub dynamic: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -112,6 +117,25 @@ mod tests {
             addr = "y"
         "#;
         assert!(ClusterConfig::from_toml_str(bad).is_err());
+    }
+
+    #[test]
+    fn dynamic_defaults_false_and_parses_true() {
+        let cfg = ClusterConfig::from_toml_str(SAMPLE).unwrap();
+        assert!(!cfg.node.dynamic, "dynamic 기본 false(정적 풀메시)");
+        let dyn_cfg = r#"
+            [node]
+            id = 5
+            worker_id = 5
+            listen_addr = "127.0.0.1:7005"
+            dynamic = true
+            [[peers]]
+            id = 1
+            addr = "127.0.0.1:7001"
+        "#;
+        let c = ClusterConfig::from_toml_str(dyn_cfg).unwrap();
+        assert!(c.node.dynamic, "dynamic=true 파싱");
+        assert_eq!(c.peers.len(), 1, "seed 1개");
     }
 
     #[test]

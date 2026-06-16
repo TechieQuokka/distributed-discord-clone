@@ -8,4 +8,6 @@ pub enum AuthError {
     Token(String),
     #[error("proof-of-work error: {0}")]
     Pow(String),
+    #[error("webauthn error: {0}")]
+    WebAuthn(String),
 }

@@ -8,6 +8,7 @@
 use axum::extract::ws::{Message, WebSocket};
 use domain::id::{Snowflake, UserId};
 use domain::repo::Store;
+use node::Status;
 use serde_json::{Value, json};
 use transport::NodeTransport;
 
@@ -118,7 +119,7 @@ async fn run_identify<S: Store + 'static, T: NodeTransport>(
         .await;
     }
 
-    pump(&mut socket, &state, rx).await;
+    pump(&mut socket, &state, Some(user_id), rx).await;
     state.hub.detach(session_id); // 끊김: 버퍼 유지(RESUME 대비). grace 후 Hub가 purge.
     // 마지막 live 세션이 끊겼으면 presence 오프라인 전이.
     if state.hub.live_count(user_id) == 0 {
@@ -160,7 +161,7 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
                 )
                 .await;
             }
-            pump(&mut socket, &state, rx).await;
+            pump(&mut socket, &state, user_id, rx).await;
             state.hub.detach(session_id);
             if let Some(u) = user_id
                 && state.hub.live_count(u) == 0
@@ -178,10 +179,11 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
     }
 }
 
-/// 메인 루프: 클라 수신(하트비트 등) ↔ Hub 배달 프레임 송신. 끊김/종료 시 반환.
+/// 메인 루프: 클라 수신(하트비트/상태변경 등) ↔ Hub 배달 프레임 송신. 끊김/종료 시 반환.
 async fn pump<S: Store + 'static, T: NodeTransport>(
     socket: &mut WebSocket,
-    _state: &GatewayState<S, T>,
+    state: &GatewayState<S, T>,
+    user_id: Option<u64>,
     mut rx: tokio::sync::mpsc::Receiver<Outgoing>,
 ) {
     loop {
@@ -193,6 +195,16 @@ async fn pump<S: Store + 'static, T: NodeTransport>(
                             match inc.op {
                                 op::HEARTBEAT
                                     if send(socket, Outgoing::heartbeat_ack()).await.is_err() => { break; }
+                                // 클라 상태 변경(online/idle/dnd, D42). offline은 무시(연결 중엔 online 계열만).
+                                op::PRESENCE_UPDATE => {
+                                    if let (Some(u), Some(st)) = (user_id, parse_presence_status(&inc.d)) {
+                                        crate::presence::set_status(
+                                            &state.presence, &state.hub, &*state.store, &state.router,
+                                            state.local_node_id, u, st,
+                                        )
+                                        .await;
+                                    }
+                                }
                                 _ => {} // RESUME/IDENTIFY는 핸드셰이크 단계 전용. 그 외 무시.
                             }
                         }
@@ -273,6 +285,33 @@ fn rid(raw: u64) -> domain::id::RealmId {
     domain::id::RealmId(Snowflake::from_raw(raw))
 }
 
+/// op 3 페이로드 `{ "status": "online"|"idle"|"dnd" }`를 파싱. 연결 중엔 online 계열만 허용
+/// (offline/미상은 None → 무시; 오프라인 전이는 세션 종료가 담당).
+fn parse_presence_status(d: &Value) -> Option<Status> {
+    match d.get("status").and_then(|s| s.as_str()) {
+        Some("online") => Some(Status::Online),
+        Some("idle") => Some(Status::Idle),
+        Some("dnd") => Some(Status::Dnd),
+        _ => None,
+    }
+}
+
 async fn send(socket: &mut WebSocket, out: Outgoing) -> Result<(), axum::Error> {
     socket.send(Message::Text(out.to_json().into())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_presence_status_accepts_online_family_only() {
+        assert_eq!(parse_presence_status(&json!({ "status": "online" })), Some(Status::Online));
+        assert_eq!(parse_presence_status(&json!({ "status": "idle" })), Some(Status::Idle));
+        assert_eq!(parse_presence_status(&json!({ "status": "dnd" })), Some(Status::Dnd));
+        // offline/미상/누락은 None → op 3 무시 (오프라인 전이는 세션 종료가 담당).
+        assert_eq!(parse_presence_status(&json!({ "status": "offline" })), None);
+        assert_eq!(parse_presence_status(&json!({ "status": "bogus" })), None);
+        assert_eq!(parse_presence_status(&json!({})), None);
+    }
 }

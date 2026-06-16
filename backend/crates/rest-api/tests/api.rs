@@ -28,14 +28,17 @@ use domain::relationship::{RelationKind, Relationship};
 use domain::attachment::{Attachment, NewAttachment};
 use domain::audit::{AuditEntry, NewAuditEntry};
 use domain::blob::{BlobError, BlobStore};
+use domain::event::{RealmEventKind, RealmEventRecord};
 use domain::repo::{
     AttachmentRepository, AuditRepository, ChannelOverwriteRepository, ChannelRepository,
-    DmRepository, GuildRepository, InviteRepository, MessageRepository, ReactionRepository,
-    ReadStateRepository, RefreshTokenRepository, RelationshipRepository, RepoError, RoleRepository,
-    ThreadRepository, UserRepository, WebhookRepository,
+    DmRepository, EventLogRepository, GuildRepository, InviteRepository, MessageRepository,
+    ReactionRepository, ReadStateRepository, RefreshTokenRepository, RelationshipRepository,
+    RepoError, RoleRepository, ThreadRepository, UserRepository, WebAuthnRepository,
+    WebhookRepository,
 };
 use domain::role::{NewRole, Role};
 use domain::thread::{NewThread, Thread};
+use domain::webauthn::{NewWebAuthnCredential, WebAuthnCredential};
 use domain::webhook::{NewWebhook, Webhook};
 use domain::user::{NewUser, User};
 use node::clock::{Clock, ManualClock};
@@ -69,6 +72,9 @@ struct Inner {
     attachments: Vec<Attachment>,
     webhooks: Vec<Webhook>,
     audit: Vec<AuditEntry>,
+    webauthn: Vec<(u64, Vec<u8>, String)>, // (user_id, credential_id, passkey_json) (D19)
+    events: Vec<(u64, u64, RealmEventKind)>, // (realm_id, seq, kind) — 이벤트 소싱 로그 (D48)
+    crdt: HashMap<(u64, String), (Option<String>, u64, u64)>, // (user,key) → (value, ts, node) — CRDT 동기화 (D49)
 }
 
 #[derive(Default, Clone)]
@@ -831,6 +837,92 @@ impl AuditRepository for MemStore {
     }
 }
 
+impl WebAuthnRepository for MemStore {
+    async fn add_credential(&self, c: &NewWebAuthnCredential) -> Result<(), RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        if g.webauthn.iter().any(|(_, cid, _)| *cid == c.credential_id) {
+            return Err(RepoError::Conflict);
+        }
+        g.webauthn.push((c.user_id.0.raw(), c.credential_id.clone(), c.passkey_json.clone()));
+        Ok(())
+    }
+    async fn list_credentials(&self, user: UserId) -> Result<Vec<WebAuthnCredential>, RepoError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .webauthn
+            .iter()
+            .filter(|(u, ..)| *u == user.0.raw())
+            .map(|(_, cid, pk)| WebAuthnCredential { credential_id: cid.clone(), passkey_json: pk.clone() })
+            .collect())
+    }
+    async fn update_credential(&self, credential_id: &[u8], passkey_json: &str) -> Result<(), RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        for (_, cid, pk) in g.webauthn.iter_mut() {
+            if cid == credential_id {
+                *pk = passkey_json.to_string();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl domain::repo::CrdtRepository for MemStore {
+    async fn load_user_doc(&self, user: UserId) -> Result<domain::crdt::LwwMap, RepoError> {
+        let g = self.inner.lock().unwrap();
+        let u = user.0.raw();
+        let entries = g.crdt.iter().filter(|((uid, _), _)| *uid == u).map(|((_, k), (v, ts, n))| {
+            domain::crdt::CrdtEntry { key: k.clone(), value: v.clone(), ts_ms: *ts, node: *n }
+        });
+        Ok(domain::crdt::LwwMap::from_entries(entries))
+    }
+    async fn merge_user_doc(
+        &self,
+        user: UserId,
+        entries: &[domain::crdt::CrdtEntry],
+    ) -> Result<domain::crdt::LwwMap, RepoError> {
+        {
+            let mut g = self.inner.lock().unwrap();
+            let u = user.0.raw();
+            for e in entries {
+                let slot = g.crdt.entry((u, e.key.clone())).or_insert((None, 0, 0));
+                // LWW 가드: (ts,node) 큰 것만 채택.
+                if (e.ts_ms, e.node) > (slot.1, slot.2) {
+                    *slot = (e.value.clone(), e.ts_ms, e.node);
+                }
+            }
+        }
+        self.load_user_doc(user).await
+    }
+}
+
+impl EventLogRepository for MemStore {
+    async fn append_event(&self, realm: RealmId, kind: &RealmEventKind) -> Result<u64, RepoError> {
+        let mut g = self.inner.lock().unwrap();
+        let r = realm.0.raw();
+        let seq = g.events.iter().filter(|(rid, ..)| *rid == r).count() as u64 + 1;
+        g.events.push((r, seq, kind.clone()));
+        Ok(seq)
+    }
+    async fn replay_events(
+        &self,
+        realm: RealmId,
+        after_seq: u64,
+    ) -> Result<Vec<RealmEventRecord>, RepoError> {
+        let r = realm.0.raw();
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|(rid, seq, _)| *rid == r && *seq > after_seq)
+            .map(|(_, seq, kind)| RealmEventRecord { realm_id: realm, seq: *seq, kind: kind.clone() })
+            .collect())
+    }
+}
+
 /// 인메모리 BlobStore (테스트용) — key→bytes.
 #[derive(Default, Clone)]
 struct MemBlobStore {
@@ -903,6 +995,10 @@ impl Harness {
         let emitter = Arc::new(RecordingEmitter::default());
         let user_emitter = Arc::new(RecordingUserEmitter::default());
         let blobs = MemBlobStore::default();
+        // WebAuthn(D19): 테스트는 항상 localhost RP로 활성 (다른 라우트엔 무영향).
+        let webauthn = Some(Arc::new(
+            auth::WebauthnService::new("localhost", "http://localhost:8080").unwrap(),
+        ));
         let state = AppState::new(
             Arc::clone(&store),
             Arc::clone(&keys),
@@ -913,6 +1009,7 @@ impl Harness {
             Arc::clone(&emitter) as Arc<dyn domain::emit::RealmEmitter>,
             Arc::clone(&user_emitter) as Arc<dyn domain::emit::UserEmitter>,
             Arc::new(blobs.clone()) as Arc<dyn domain::blob::BlobStore>,
+            webauthn,
         );
         Self { router: rest_api::router(state), keys, pow, store, snow, clock, emitter, user_emitter, blobs }
     }
@@ -1893,4 +1990,114 @@ async fn search_matches_and_channel_permission_filter() {
     let outsider = h.token(h.user("se_out"));
     let (st, _) = h.req("GET", &format!("/guilds/{gid}/messages/search?content=fox"), Some(&outsider), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+// ── WebAuthn / Passkeys (D19) ──────────────────────────────────────────
+// SoftPasskey로 register→login ceremony를 HTTP 계층 전체에 통과시켜 검증(헤드리스).
+#[tokio::test]
+async fn webauthn_register_then_passwordless_login() {
+    use auth::webauthn::{CreationChallengeResponse, RequestChallengeResponse, Url};
+    use webauthn_authenticator_rs::WebauthnAuthenticator;
+    use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+
+    let h = Harness::new();
+    let uid = h.user("wa_alice");
+    let tok = h.token(uid);
+    let origin = Url::parse("http://localhost:8080").unwrap();
+    let mut authr = WebauthnAuthenticator::new(SoftPasskey::new(true));
+
+    // 1) 등록 시작 → challenge.
+    let (st, body) = h.req("POST", "/auth/webauthn/register/start", Some(&tok), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK, "register/start: {body}");
+    let cid = body["ceremony_id"].as_str().unwrap().to_string();
+    let ccr: CreationChallengeResponse = serde_json::from_value(body["options"].clone()).unwrap();
+
+    // 2) SoftPasskey가 자격증명 생성 → 등록 완료.
+    let rpkc = authr.do_registration(origin.clone(), ccr).expect("soft register");
+    let (st, body) = h
+        .req(
+            "POST",
+            "/auth/webauthn/register/finish",
+            Some(&tok),
+            Some(json!({ "ceremony_id": cid, "credential": rpkc })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "register/finish: {body}");
+
+    // 3) 암호 없는 로그인 시작 → challenge.
+    let (st, body) = h.req("POST", "/auth/webauthn/login/start", None, Some(json!({ "username": "wa_alice" }))).await;
+    assert_eq!(st, StatusCode::OK, "login/start: {body}");
+    let cid = body["ceremony_id"].as_str().unwrap().to_string();
+    let rcr: RequestChallengeResponse = serde_json::from_value(body["options"].clone()).unwrap();
+
+    // 4) SoftPasskey가 challenge에 서명 → 로그인 완료 → 토큰 발급.
+    let pkc = authr.do_authentication(origin, rcr).expect("soft auth");
+    let (st, body) = h
+        .req(
+            "POST",
+            "/auth/webauthn/login/finish",
+            None,
+            Some(json!({ "ceremony_id": cid, "credential": pkc })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "login/finish: {body}");
+    assert!(body["access_token"].as_str().is_some(), "암호 없이 access 토큰 발급");
+    assert!(body["refresh_token"].as_str().is_some());
+    assert_eq!(body["user_id"].as_str(), Some(uid.to_string().as_str()));
+}
+
+// 알 수 없는 ceremony_id로 finish → 400.
+#[tokio::test]
+async fn webauthn_unknown_ceremony_rejected() {
+    let h = Harness::new();
+    let (st, _) = h
+        .req("POST", "/auth/webauthn/login/finish", None, Some(json!({ "ceremony_id": "999", "credential": {} })))
+        .await;
+    assert!(st.is_client_error(), "잘못된 ceremony/credential은 4xx 거부 (got {st})");
+}
+
+// ── CRDT 오프라인 동기화 (D49) ─────────────────────────────────────────
+
+#[tokio::test]
+async fn crdt_sync_two_devices_converge() {
+    let h = Harness::new();
+    let u = h.user("syncer");
+    let token = h.token(u);
+
+    // 기기1(node 1): draft="phone" @200. 기기2(node 2): 같은 키 draft="laptop" @210 (오프라인 동시 편집).
+    let (s1, _) = h
+        .req("POST", "/users/@me/sync", Some(&token),
+            Some(json!({ "entries": [{ "key": "draft", "value": "phone", "ts": 200, "node": 1 }] })))
+        .await;
+    assert_eq!(s1, StatusCode::OK);
+    let (s2, d2) = h
+        .req("POST", "/users/@me/sync", Some(&token),
+            Some(json!({ "entries": [{ "key": "draft", "value": "laptop", "ts": 210, "node": 2 }] })))
+        .await;
+    assert_eq!(s2, StatusCode::OK);
+    // 더 늦은 쓰기(laptop)로 수렴 (LWW).
+    assert_eq!(d2["live"]["draft"], json!("laptop"));
+
+    // 이른 쓰기 재push → 무시(수렴 안정). GET도 같은 값.
+    let _ = h
+        .req("POST", "/users/@me/sync", Some(&token),
+            Some(json!({ "entries": [{ "key": "draft", "value": "phone", "ts": 200, "node": 1 }] })))
+        .await;
+    let (sg, dg) = h.req("GET", "/users/@me/sync", Some(&token), None).await;
+    assert_eq!(sg, StatusCode::OK);
+    assert_eq!(dg["live"]["draft"], json!("laptop"), "이른 쓰기는 못 덮음");
+
+    // 툼스톤 삭제(더 늦은 dot) → live에서 사라짐.
+    let (_, dd) = h
+        .req("POST", "/users/@me/sync", Some(&token),
+            Some(json!({ "entries": [{ "key": "draft", "value": null, "ts": 220, "node": 2 }] })))
+        .await;
+    assert!(dd["live"].get("draft").is_none(), "툼스톤 삭제 후 live 비어야");
+}
+
+#[tokio::test]
+async fn crdt_sync_requires_auth() {
+    let h = Harness::new();
+    let (st, _) = h.req("GET", "/users/@me/sync", None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "인증 없으면 401");
 }

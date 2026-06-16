@@ -17,7 +17,31 @@ use transport::NodeTransport;
 use crate::hub::Hub;
 use crate::protocol::ServerEvent;
 
-/// 로컬 유저 온라인 전이: 레지스트리 set + gossip 브로드캐스트 + 로컬 친구 통지.
+/// 로컬 유저가 `status`로 전이(online/idle/dnd): 레지스트리 set + gossip 브로드캐스트 + 로컬 친구 통지.
+/// 클라 op 3(PRESENCE_UPDATE)와 세션 온라인 전이가 공유하는 경로 (D42).
+pub async fn set_status<S: Store, T: NodeTransport>(
+    presence: &Presence,
+    hub: &Hub,
+    store: &S,
+    router: &Router<T>,
+    local_node: u64,
+    user: u64,
+    status: Status,
+) {
+    let changed = presence.set(user, local_node, status);
+    router
+        .broadcast(NodeMessage::PresenceGossip {
+            user_id: user,
+            node_id: local_node,
+            status: status.as_u8(),
+        })
+        .await;
+    if changed {
+        notify_friends(hub, store, presence, user).await;
+    }
+}
+
+/// 로컬 유저 온라인 전이(세션 첫 live): `set_status(Online)`의 단축.
 pub async fn set_online<S: Store, T: NodeTransport>(
     presence: &Presence,
     hub: &Hub,
@@ -26,17 +50,7 @@ pub async fn set_online<S: Store, T: NodeTransport>(
     local_node: u64,
     user: u64,
 ) {
-    let changed = presence.set(user, local_node, Status::Online);
-    router
-        .broadcast(NodeMessage::PresenceGossip {
-            user_id: user,
-            node_id: local_node,
-            status: Status::Online.as_u8(),
-        })
-        .await;
-    if changed {
-        notify_friends(hub, store, presence, user).await;
-    }
+    set_status(presence, hub, store, router, local_node, user, Status::Online).await;
 }
 
 /// 로컬 유저 오프라인 전이 (마지막 live 세션 종료): 레지스트리 clear + gossip + 로컬 친구 통지.

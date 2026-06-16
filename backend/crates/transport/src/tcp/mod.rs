@@ -5,7 +5,7 @@
 //! - 피어별 writer 태스크(mpsc 큐)로 송신 직렬화. reader는 프레임을 inbound 채널로.
 //! - 끊기면 dial 측이 재연결(backoff). 송신 시 미연결 피어 → Unreachable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,11 +27,43 @@ type Peers = Arc<Mutex<HashMap<u64, tokio::sync::mpsc::Sender<NodeMessage>>>>;
 pub struct TcpTransport {
     local_node_id: u64,
     peers: Peers,
+    /// dial을 이미 건 피어 — SWIM 동적 발견(D45) 시 중복 dial 루프 방지.
+    dialing: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl TcpTransport {
     pub fn new(local_node_id: u64) -> Self {
-        Self { local_node_id, peers: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            local_node_id,
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            dialing: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// 현재 핸드셰이크 완료(송신 가능)된 피어인가.
+    pub fn is_connected(&self, peer_id: u64) -> bool {
+        self.peers.lock().unwrap().contains_key(&peer_id)
+    }
+
+    /// 런타임 신규 피어 연결 (D45 — SWIM이 발견한 노드를 동적 dial). 이미 연결됐거나 dial 중이면 no-op(false).
+    /// dial 정책(누가 누구에게)은 호출자(server)가 결정 — 보통 작은 id가 큰 id에게(D4 §6) + 합류 시 seed.
+    pub fn connect_peer(
+        &self,
+        peer_id: u64,
+        addr: String,
+        host: String,
+        client_cfg: Arc<ClientConfig>,
+        inbound_tx: tokio::sync::mpsc::Sender<Inbound>,
+    ) -> bool {
+        {
+            let mut dialing = self.dialing.lock().unwrap();
+            if self.peers.lock().unwrap().contains_key(&peer_id) || dialing.contains(&peer_id) {
+                return false;
+            }
+            dialing.insert(peer_id);
+        }
+        self.dial(peer_id, addr, host, client_cfg, inbound_tx);
+        true
     }
 
     /// 수신 리스너 시작(accept 루프 spawn). 받은 메시지는 `inbound_tx`로.
@@ -224,6 +256,21 @@ mod tests {
             .expect("inbound 채널 종료");
         assert_eq!(got.src, 1, "프레임 헤더의 src_node_id로 피어 식별");
         assert_eq!(got.msg, msg);
+    }
+
+    /// 동적 dial(D45): 같은 피어로의 두 번째 connect_peer는 중복 dial을 막아 false 반환.
+    #[tokio::test]
+    async fn connect_peer_dedups() {
+        install_crypto();
+        let mesh = generate_mesh(&["127.0.0.1"]).unwrap();
+        let t = TcpTransport::new(1);
+        let (in_tx, _in_rx) = tokio::sync::mpsc::channel(8);
+        let cfg = client_config(&mesh.material(0)).unwrap();
+        assert!(!t.is_connected(2));
+        let first = t.connect_peer(2, "127.0.0.1:65000".into(), "127.0.0.1".into(), cfg.clone(), in_tx.clone());
+        let second = t.connect_peer(2, "127.0.0.1:65000".into(), "127.0.0.1".into(), cfg, in_tx);
+        assert!(first, "첫 connect_peer는 dial 시작");
+        assert!(!second, "이미 dial 중인 피어는 중복 dial 안 함");
     }
 
     /// mTLS: CA가 다른(신뢰 안 되는) 클라는 거부되어 메시지가 배달되지 않음.
