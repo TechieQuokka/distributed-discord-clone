@@ -6,6 +6,7 @@
 mod gateway_client;
 mod rest;
 mod scenario;
+mod webauthn;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -112,6 +113,16 @@ enum Command {
     Listen(ListenArgs),
     /// 헤드리스 종단 시나리오 자동 검증 (D1).
     Scenario(ScenarioArgs),
+    /// WebAuthn/Passkeys 데모 (D19): 가입→passkey 등록→암호 없는 로그인 (SoftPasskey 헤드리스).
+    WebauthnDemo(WebauthnDemoArgs),
+}
+
+#[derive(Args)]
+struct WebauthnDemoArgs {
+    #[arg(long)]
+    username: String,
+    #[arg(long, default_value = "password123")]
+    password: String,
 }
 
 #[derive(Args)]
@@ -714,6 +725,7 @@ async fn main() -> std::process::ExitCode {
         }),
         Command::Listen(a) => gateway_client::listen(&base, &a.token, a.seconds).await,
         Command::Scenario(a) => return scenario::run(&base, &a.password).await,
+        Command::WebauthnDemo(a) => webauthn::demo(&base, &a.username, &a.password).await,
     };
 
     match result {

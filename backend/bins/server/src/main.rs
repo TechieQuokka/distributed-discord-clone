@@ -57,6 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("db connected + migrations applied");
 
     let store = Arc::new(PgStore::new(pool.clone()));
+    // 신규 월 메시지 파티션 사전 생성(D28, 04 §6) — 이번 달 + 2개월. 멱등(이미 있으면 0).
+    // 다가오는 달 메시지가 DEFAULT로 새어 "최근=핫" 지역성이 무너지는 것을 방지.
+    match store.ensure_message_partitions(2).await {
+        Ok(n) => info!(created = n, "message partitions ensured (this month + 2)"),
+        Err(e) => tracing::warn!(error = %e, "파티션 사전 생성 실패(계속 — DEFAULT가 흡수)"),
+    }
     // 노드당 단일 Snowflake generator (D11) — Router·REST·Gateway 공유.
     let snowflakes = Arc::new(SnowflakeGenerator::new(worker_id));
     // PASETO 키: 멀티노드는 모든 노드가 **공유 키**여야 토큰 상호 검증 가능(D14).
@@ -116,18 +122,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // persist-then-fanout 드라이버 (D24).
     tokio::spawn(gateway::run_dispatch(events_rx, Arc::clone(&router), Arc::clone(&store), hub.clone()));
 
-    // 멀티노드 전송 가동: listen + dial(작은 id가 큰 id에게) + 크로스노드 inbound 루프.
+    // 멀티노드 전송 가동: listen + dial + SWIM 멤버십(D45) + 크로스노드 inbound 루프.
     if let Some(c) = &cluster {
         let tls = load_tls(node_id)?;
+        let cli_cfg = transport::client_config(&tls)?; // 동적 dial 재사용용 클라 설정.
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>(1024);
         transport
             .listen(&c.node.listen_addr, transport::server_config(&tls)?, inbound_tx.clone())
             .await?;
-        for peer in c.peers_to_dial() {
-            let host = host_of(&peer.addr);
-            transport.dial(peer.id, peer.addr.clone(), host, transport::client_config(&tls)?, inbound_tx.clone());
+
+        // SWIM 멤버십 뷰 (D45) — config peers를 seed로 주입. 파라미터는 env로 운영 노출(H4).
+        let (swim_cfg, swim_interval_ms) = swim_config_from_env();
+        let swim = Arc::new(node::Swim::new(
+            node_id,
+            c.node.listen_addr.clone(),
+            swim_cfg,
+            node_id.wrapping_mul(0x9E37_79B9_7F4A_7C15), // 노드별 시드.
+        ));
+        for p in &c.peers {
+            swim.seed_member(p.id, p.addr.clone());
         }
-        // 수신: 원격 RealmSend→로컬 액터 / 원격 RealmFanout→로컬 세션 배달 / PresenceGossip→presence 적용.
+
+        // 신규 노드 Alive 학습 시 훅(D45/D46): (1) 작은 id가 큰 id에게 동적 dial, (2) presence 스냅샷 push.
+        let on_member_up: node::MemberUpHook = {
+            let transport = transport.clone();
+            let inbound = inbound_tx.clone();
+            let cli_cfg = cli_cfg.clone();
+            let presence = Arc::clone(&presence);
+            let router = Arc::clone(&router);
+            let local = node_id;
+            Arc::new(move |peer: u64, addr: String| {
+                if local < peer {
+                    let host = host_of(&addr);
+                    transport.connect_peer(peer, addr, host, cli_cfg.clone(), inbound.clone());
+                }
+                // D46 presence anti-entropy: 내 호스팅 유저 presence를 신규 노드에 push.
+                let snap = presence.snapshot_local(local);
+                if !snap.is_empty() {
+                    let router = Arc::clone(&router);
+                    tokio::spawn(async move {
+                        for (user, status) in snap {
+                            router
+                                .send_to(
+                                    peer,
+                                    protocol::NodeMessage::PresenceGossip {
+                                        user_id: user,
+                                        node_id: local,
+                                        status: status.as_u8(),
+                                    },
+                                )
+                                .await;
+                        }
+                    });
+                }
+            })
+        };
+
+        // 부트스트랩 dial: dynamic이면 seed 전체에 무조건(합류 연결), 아니면 정적 풀메시(작은→큰 id).
+        if c.node.dynamic {
+            for p in &c.peers {
+                transport.connect_peer(p.id, p.addr.clone(), host_of(&p.addr), cli_cfg.clone(), inbound_tx.clone());
+            }
+        } else {
+            for peer in c.peers_to_dial() {
+                transport.connect_peer(peer.id, peer.addr.clone(), host_of(&peer.addr), cli_cfg.clone(), inbound_tx.clone());
+            }
+        }
+
+        // 수신: 원격 RealmSend/Fanout / PresenceGossip / UserDeliver / **SWIM 멤버십**.
         tokio::spawn(run_inbound(
             inbound_rx,
             Arc::clone(&router),
@@ -135,22 +197,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&clock),
             Arc::clone(&presence),
             Arc::clone(&store),
+            Arc::clone(&swim),
+            on_member_up.clone(),
         ));
 
-        // PING/PONG 생사 판정 (D23): 피어 down → 링 failover. interval 1s / timeout 3s.
-        let peer_ids: Vec<u64> = c.peers.iter().map(|p| p.id).collect();
-        tokio::spawn(node::run_failure_detector(
-            transport.clone(),
-            Arc::clone(router.membership()),
-            peer_ids,
+        // SWIM 주기 드라이버 (D45) — 정적 run_failure_detector(D23)를 대체. dynamic이면 seed에 SwimJoin.
+        let seeds: Vec<u64> = if c.node.dynamic { c.peers.iter().map(|p| p.id).collect() } else { Vec::new() };
+        tokio::spawn(node::run_swim(
+            Arc::clone(&swim),
+            Arc::clone(&router),
             Arc::clone(&clock),
-            1_000,
-            3_000,
+            on_member_up,
+            swim_interval_ms,
+            seeds,
         ));
-        info!(node_id, listen = %c.node.listen_addr, peers = c.peers.len(), "node mesh active (mTLS) + failure detector");
+        info!(node_id, listen = %c.node.listen_addr, peers = c.peers.len(), dynamic = c.node.dynamic, "node mesh active (mTLS) + SWIM membership");
     } else {
         info!(node_id, "single-node mode (no cluster config)");
     }
+
+    // WebAuthn/Passkeys (D19) — RP가 env로 구성된 경우만 활성(없으면 webauthn 엔드포인트 404).
+    let webauthn = match (std::env::var("WEBAUTHN_RP_ID"), std::env::var("WEBAUTHN_RP_ORIGIN")) {
+        (Ok(rp_id), Ok(rp_origin)) => match auth::WebauthnService::new(&rp_id, &rp_origin) {
+            Ok(s) => {
+                info!(rp_id, rp_origin, "webauthn enabled");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "WEBAUTHN 설정 무효 — 비활성");
+                None
+            }
+        },
+        _ => None,
+    };
 
     // REST(auth/guild/history) 라우터. Router를 Realm emit 포트(D39, 멤버 변동 팬아웃),
     // UserRouter를 유저 emit 포트(친구·차단·읽음 통지)로 주입 — 크로스노드 타깃 배달(D43).
@@ -165,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&router) as Arc<dyn domain::emit::RealmEmitter>,
         Arc::new(user_router) as Arc<dyn domain::emit::UserEmitter>,
         Arc::clone(&blobs),
+        webauthn,
     ));
 
     // Gateway(WS + 메시지 전송) 라우터.
@@ -187,8 +267,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 원격 노드 메시지 처리 루프 (Phase 2 크로스노드 배달).
+/// 원격 노드 메시지 처리 루프 (Phase 2 크로스노드 배달 + Phase 5 SWIM).
 /// 모든 인바운드는 그 자체로 피어 liveness 증거 → `record_seen`으로 생사 뷰 갱신 (D23).
+#[allow(clippy::too_many_arguments)]
 async fn run_inbound(
     mut rx: mpsc::Receiver<Inbound>,
     router: Arc<Router<TcpTransport>>,
@@ -196,19 +277,33 @@ async fn run_inbound(
     clock: Arc<dyn Clock>,
     presence: Arc<node::Presence>,
     store: Arc<PgStore>,
+    swim: Arc<node::Swim>,
+    on_member_up: node::MemberUpHook,
 ) {
+    use protocol::NodeMessage as M;
     while let Some(inbound) = rx.recv().await {
-        router.membership().record_seen(inbound.src, clock.now_ms());
+        let now = clock.now_ms();
+        let src = inbound.src;
+        router.membership().record_seen(src, now);
         match inbound.msg {
             // 전역 presence gossip(Q11/D12): view 갱신 + 그 유저의 로컬 친구에게 PRESENCE_UPDATE 배달.
-            protocol::NodeMessage::PresenceGossip { user_id, node_id, status } => {
+            M::PresenceGossip { user_id, node_id, status } => {
                 gateway::presence::apply_gossip(&presence, &hub, &*store, user_id, node_id, status).await;
             }
             // 크로스노드 유저 이벤트 타깃 배달(D43): 이 노드의 로컬 세션에 흘린다.
-            protocol::NodeMessage::UserDeliver { t, payload, user_ids } => {
+            M::UserDeliver { t, payload, user_ids } => {
                 gateway::deliver_user(&hub, t, payload, &user_ids).await;
             }
-            _ => match router.handle_inbound(inbound).await {
+            // SWIM 멤버십(D45): 상태머신에 합병 → 부수효과(송신/링 변형/dial)를 실행.
+            m @ (M::SwimJoin { .. }
+            | M::SwimPing { .. }
+            | M::SwimAck { .. }
+            | M::SwimPingReq { .. }
+            | M::SwimGossip { .. }) => {
+                let actions = swim.handle(src, &m, now);
+                node::apply_swim_actions(&router, &on_member_up, now, actions).await;
+            }
+            other => match router.handle_inbound(Inbound { src, msg: other }).await {
                 Ok(Some(delivery)) => gateway::deliver_local(&hub, &delivery).await,
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "inbound handle failed"),
@@ -241,6 +336,22 @@ fn host_of(addr: &str) -> String {
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+/// SWIM 파라미터를 env로 운영 노출 (H4, D45). 미설정 시 기본값. → (config, probe interval ms).
+fn swim_config_from_env() -> (node::SwimConfig, u64) {
+    let d = node::SwimConfig::default();
+    let cfg = node::SwimConfig {
+        ping_timeout_ms: env_parse("SWIM_PING_TIMEOUT_MS", d.ping_timeout_ms),
+        probe_period_ms: env_parse("SWIM_PROBE_PERIOD_MS", d.probe_period_ms),
+        suspicion_timeout_ms: env_parse("SWIM_SUSPICION_TIMEOUT_MS", d.suspicion_timeout_ms),
+        indirect_k: env_parse("SWIM_INDIRECT_K", d.indirect_k),
+        gossip_fanout: env_parse("SWIM_GOSSIP_FANOUT", d.gossip_fanout),
+        dissemination_count: env_parse("SWIM_DISSEMINATION_COUNT", d.dissemination_count),
+        max_piggyback: env_parse("SWIM_MAX_PIGGYBACK", d.max_piggyback),
+        anti_entropy_ticks: env_parse("SWIM_ANTI_ENTROPY_TICKS", d.anti_entropy_ticks),
+    };
+    (cfg, env_parse("SWIM_PROBE_INTERVAL_MS", 500))
 }
 
 /// dev 인증서 생성: 공유 CA + 각 노드 cert(SAN=127.0.0.1) → `<out>/{ca,n<id>.cert,n<id>.key}.pem`.

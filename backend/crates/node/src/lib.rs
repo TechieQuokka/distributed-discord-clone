@@ -13,6 +13,7 @@ pub mod presence;
 pub mod realm;
 pub mod ring;
 pub mod router;
+pub mod swim;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use membership::Membership;
@@ -20,3 +21,6 @@ pub use presence::{Presence, Status};
 pub use realm::{RealmActor, RealmCommand, RealmEvent};
 pub use ring::HashRing;
 pub use router::{LocalDelivery, Routed, Router, RouterError, run_failure_detector};
+pub use swim::{
+    MemberState, MemberUpHook, Swim, SwimAction, SwimConfig, apply_swim_actions, run_swim,
+};

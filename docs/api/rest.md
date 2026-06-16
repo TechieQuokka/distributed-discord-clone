@@ -67,6 +67,7 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | DELETE | `/users/@me/relationships/{user_id}` | (인증) | 친구 삭제/요청 취소·거절/차단 해제 → `RELATIONSHIP_REMOVE` |
 | POST | `/channels/{id}/messages/{mid}/ack` | VIEW_CHANNEL | 채널을 그 메시지까지 읽음 처리(+멘션수 재계산) → `MESSAGE_ACK`(유저 emit) (D41) |
 | GET | `/users/@me/read-states` | (인증) | 내 읽음 상태 목록(채널별 last_read + mention_count). READY 스냅샷과 동일 |
+| GET / POST | `/users/@me/sync` | (인증) | CRDT 오프라인 동기화 문서(D49, V21). POST=기기 로컬 엔트리 LWW 병합→병합 문서 회신 · GET=현재 병합 문서. `{entries:[{key,value?,ts,node}]}`(value null=툼스톤). 충돌 없이 수렴 |
 | PUT | `/channels/{id}/permissions/{target_id}` | MANAGE_ROLES | 오버라이드 upsert (DELETE는 후속) |
 | GET | `/channels/{id}/messages` | VIEW_CHANNEL + READ_MESSAGE_HISTORY | 히스토리 커서 (D38) |
 | GET | `/guilds/{id}/messages/search` | 멤버 (결과는 VIEW_CHANNEL 채널 한정) | 전문검색 `?content=&limit=` (Q10, Postgres FTS `websearch_to_tsquery`, V12 `content_tsv`+GIN) |
@@ -97,8 +98,12 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | POST | `/auth/mfa/totp/enable` | TOTP 시크릿 발급(QR) (D19) |
 | POST | `/auth/mfa/totp/verify` | TOTP 코드 검증/활성화 |
 | POST | `/auth/mfa/totp` | 로그인 2단계 코드 제출 |
+| POST | `/auth/webauthn/register/start` | (인증) Passkey 등록 challenge 발급 → `{ceremony_id, options}` (D19) |
+| POST | `/auth/webauthn/register/finish` | (인증) `{ceremony_id, credential}` → Passkey 저장 |
+| POST | `/auth/webauthn/login/start` | `{username}` → 인증 challenge `{ceremony_id, options}` |
+| POST | `/auth/webauthn/login/finish` | `{ceremony_id, credential}` → 서명 검증 후 `{access, refresh}` (암호 없는 로그인) |
 
-> WebAuthn/Passkeys 엔드포인트는 Phase 5 스트레치.
+> **WebAuthn/Passkeys (Phase 5, D19, 구현됨)**: `webauthn-rs`(P6) 기반 FIDO2 공개키 자격증명. ceremony 중간 상태는 휘발 인메모리(DB-D5, ceremony_id 키). 자격증명은 `webauthn_credentials`(V18, `passkey JSONB`). RP = env `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_ORIGIN`(기본 localhost). 미설정 노드는 404. seam: usernameless·멀티노드 ceremony 공유는 후속.
 
 ---
 
@@ -114,6 +119,7 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | GET | `/users/@me/relationships` | 친구/차단/대기 목록 |
 | PUT | `/users/@me/relationships/{user_id}` | 친구 요청/수락 또는 차단 (`kind`) |
 | DELETE | `/users/@me/relationships/{user_id}` | 친구 삭제/차단 해제 |
+| GET/POST | `/users/@me/sync` | CRDT 오프라인 동기화 문서 (D49) — POST=LWW 병합, GET=조회 |
 
 ---
 

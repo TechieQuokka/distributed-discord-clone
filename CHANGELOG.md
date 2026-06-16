@@ -5,6 +5,118 @@
 
 ---
 
+## [1.45.0] - 2026-06-16
+### 새 기능 — CRDT 오프라인 동기화 (Phase 5, D49)
+- **상태 기반 CRDT(CvRDT)로 충돌 없는 멀티기기 동기화** — 여러 기기가 오프라인 편집 후 재연결 시 수렴. 핵심 = 순수·테스트 가능한 merge 엔진(결합·교환·멱등 semilattice join).
+- **순수 코어(P2/DST)**: `domain::crdt` 툴킷 — `LwwRegister`·`LwwMap`(키별 LWW + 툼스톤)·`OrSet`(observed-remove, add-wins)·`PnCounter`. merge 법칙 + 오프라인 2기기 수렴을 단위 테스트 8개로 고정. domain serde 무의존.
+- **적용 = 유저 동기화 문서(LWW-Map)**: 드래프트/설정 같은 per-user 키-값. 병합 권위는 domain `LwwMap`, 영속은 storage **LWW 가드 upsert**((ts,node) 큰 것만 채택 → DB가 LWW 보존). 포트 `CrdtRepository`(load/merge) → Store 합류. REST `GET/POST /users/@me/sync`(상태 기반 — 어느 순서로 push해도 수렴).
+- **라이브 검증**(curl): phone@200 push → laptop@210 채택(LWW) → 이른 phone@200 재push 무시 → GET 수렴=laptop → 툼스톤 삭제. + rest-api HTTP 통합 테스트(2기기 수렴·인증 401).
+- crate 변경:
+  - `domain`: `crdt` 모듈(순수 툴킷, 8 단위 테스트) + `CrdtEntry`/`LwwMap` 변환 + `CrdtRepository` 포트 + Store 합류. (1.17→1.18)
+  - `storage`: **마이그레이션 V21** `user_crdt_entries` + `crdt` 어댑터(LWW 가드 upsert) + 수렴 DB 테스트. (1.19→1.20)
+  - `rest-api`: `routes/sync`(GET/POST) + 라우트 등록 + MemStore CRDT 인메모리 구현 + HTTP 통합 테스트 2. (1.18→1.19)
+  - `server`: PgStore가 자동으로 CrdtRepository 구현(Store) — 배선 변경 없음. (1.8→1.9, 파티션 startup과 동반 bump)
+- 문서: `decisions.md` D49 + §6 독창성 + Phase 5 로드맵, `02-schema.md` user_crdt_entries, `api/rest.md` sync, TODO 체크.
+- seam: 현재 LWW-Map 1종만 wire(OrSet/PnCounter 적용은 후속) · REST 폴링(실시간 WS push 아님) · 메시지 본문은 CRDT 아님(append-only D24).
+
+---
+
+## [1.44.0] - 2026-06-16
+### 새 기능 — 이벤트 소싱 (Phase 5, D48 / D23, 가산형 CQRS)
+- **append-only Realm 이벤트 로그 + 순수 프로젝션** — D23의 이벤트 소싱 스트레치를 **비파괴(가산형)**로 구현. `messages`(엔티티 진실)를 대체하지 않고 그 위에 타입화된 도메인 사실 로그(`realm_events` V20)를 얹음(CQRS: events=fact, projection=read model). 진실 중복 꼬임 회피 = messages 파괴적 마이그레이션 안 함.
+- **순수 코어(P2/DST)**: `domain::event` — `RealmEventKind`(MessageCreated/Deleted·MemberJoined/Left, 안정 code) + `RealmProjection`(이벤트 시퀀스를 **결정론적 fold** → members·message_count·last_message_id·last_seq). "상태=이벤트의 함수" 불변식을 단위 테스트로 고정(재생 결정론·증분=전체·언더플로 없음). domain serde 무의존(직렬화는 storage가 타입화 bigint 슬롯으로 소유).
+- **port + 배선**: `EventLogRepository`(append→per-realm 단조 seq, replay→증분 커서) → Store 합류. dispatch 드라이버가 persist(D24) 직후 `MessageCreated` append(**단일 직렬 소비자라 seq 경합 없음**, nonce D34 동형). 실패는 warn 후 계속(messages 진실, 로그 보조).
+- **라이브 검증**: cli scenario → `realm_events`에 MessageCreated 1건(message_id 일치). rehydrate 재생(`RealmProjection`)은 D35 캐시 warmup 입력 자리.
+- crate 변경:
+  - `domain`: `event` 모듈(순수 enum+projection) + `EventLogRepository` 포트 + Store 합류 + 단위 테스트 4. (1.16→1.17)
+  - `storage`: **마이그레이션 V20** `realm_events` + `event` 어댑터(타입화 슬롯, serde 무의존) + append→replay→projection 라운드트립 DB 테스트. (1.18→1.19)
+  - `gateway`: dispatch가 MessageCreated를 이벤트 로그에 append. (1.11→1.12)
+  - `rest-api`: 테스트 MemStore에 EventLogRepository 인메모리 구현. (no version change — 테스트만)
+- 문서: `decisions.md` D48 + D23 갱신, `02-schema.md` realm_events, TODO 체크.
+- seam: append-persist 비트랜잭션 · 멤버/삭제 생산자는 후속(rest-api 경로) · 스냅샷/컴팩션 없음 · 핫패스 2차 쓰기(write amplification).
+
+---
+
+## [1.43.1] - 2026-06-16
+### 문서 — Voice 시그널링 설계 (Phase 5, D47, 코드 미구현)
+- **Voice = 설계 문서만**(사용자 결정) — `docs/protocol/voice-signaling.md` 신설. 음성 **시그널링(제어 평면)**만 설계, **미디어(WebRTC/SFU/Opus/SRTP)는 D21 경계 밖**.
+- 핵심: voice state는 Realm 휘발 상태(D12/D42 동형)라 **REALM_FANOUT 범용 envelope(D39) 재사용** → 텍스트 메시징 인프라에 거의 코드 0으로 얹힘. gateway op 4(`VOICE_STATE_UPDATE`), 권한 CONNECT/SPEAK/MUTE·DEAFEN·MOVE_MEMBERS(permissions.md 예약 비트), wire `VOICE_STATE_SET`(0x0120 예약). VOICE_SERVER_UPDATE는 endpoint=null stub(미디어 경계 표식).
+- 결정 **D47** 추가, D21에 링크. gateway.md op 4 표기, README 인덱스, TODO 체크.
+
+---
+
+## [1.43.0] - 2026-06-16
+### 새 기능 — 신규 월 메시지 파티션 사전 생성 (Phase 5 하드닝, D28 / 04 §6)
+- **다가오는 달 파티션 자동 생성** — V17은 2026_06/_07 + DEFAULT만 만들었다. 시간이 흐르면 새 달 메시지가 DEFAULT로 쌓여 "최근=핫" 시간 지역성(04 §2)이 무너진다. 이 seam을 닫음.
+- **달력 계산은 Postgres에 위임**(앱에 날짜 라이브러리 무도입) — V19 plpgsql `ensure_message_partitions(months_ahead)`가 `(month_start_ms - EPOCH_MS) << 22` 경계로 월별 파티션을 `to_regclass` 가드로 멱등 생성. 경계가 V17 파티션과 정확히 연속(contiguous)임을 라이브 검증.
+- server가 **startup에 `ensure_message_partitions(2)` 호출**(이번 달 + 2개월). 미래 달은 DEFAULT에 행이 없어 안전.
+- crate 변경:
+  - `storage`: **마이그레이션 V19** + `partition` 모듈(`PgStore::ensure_message_partitions`) + 멱등 DB 통합 테스트(2차 호출 0개). (1.17→1.18)
+  - `server`: startup 파티션 보장 호출. (1.7→1.8)
+- 문서: `docs/database/04-partitioning-and-distributed.md` §6, `decisions.md` D28 seam 갱신.
+- seam: DEFAULT에 이미 미래-id 행이 쌓였다면 그 달 파티션 생성이 실패(로컬 study에선 비현실적) · 자동 스케줄(cron) 아님(startup 1회).
+
+---
+
+## [1.42.0] - 2026-06-16
+### 새 기능 — presence idle/dnd (Phase 5 하드닝, D42 seam)
+- **클라 상태 변경 op 3 (PRESENCE_UPDATE C→S)** — D42 presence의 "idle/dnd는 op 3 후속" seam을 닫음. presence 레지스트리는 이미 `Idle`/`Dnd`를 지원했고, 빠졌던 클라→서버 상태 변경 경로만 추가.
+- 클라가 WS로 `{ "op": 3, "d": { "status": "online"|"idle"|"dnd" } }`를 보내면 그 유저의 presence가 전이 → `PRESENCE_GOSSIP` 풀메시 broadcast + 로컬/크로스노드 친구에게 `PRESENCE_UPDATE` 배달(기존 D42 경로 재사용). 연결 중엔 online 계열만 허용(offline/미상은 무시 — 오프라인 전이는 세션 종료가 담당).
+- crate 변경:
+  - `gateway`: `protocol::op::PRESENCE_UPDATE=3` + `presence::set_status`(상태 인자화, `set_online`이 위임) + `session::pump`가 op 3 처리(user_id 전달) + `parse_presence_status` 단위 테스트. (1.10→1.11)
+- 문서: `docs/api/gateway.md`(op 3 구현 현황), `decisions.md` D42 seam 갱신.
+
+---
+
+## [1.41.0] - 2026-06-16
+### 새 기능 — WebAuthn/Passkeys (Phase 5, D19)
+- **암호 없는 로그인(FIDO2 공개키 자격증명)** — D19의 "Passkeys 스트레치"를 구현. **P6: 크립토는 검증 크레이트 `webauthn-rs`(0.5.5)** — 어테스테이션·서명·challenge·counter 전부 위임(수제 금지).
+- **흐름**: 등록(인증된 유저) `POST /auth/webauthn/register/{start,finish}` → `Passkey` 저장. 로그인 `POST /auth/webauthn/login/{start,finish}` — start는 username으로 자격증명 로드, finish는 서명 검증 후 **access+refresh 발급(암호 없는 로그인)**. counter 진전 시 재저장(클론 탐지 토대).
+- **저장**: `webauthn_credentials`(V18) — `credential_id BYTEA UNIQUE`(exclude/조회) + **`passkey JSONB`**(webauthn-rs `Passkey` 직렬화, 공개키+counter 캡슐화). domain은 opaque `passkey_json`으로만 알아 webauthn-rs 무의존(P2).
+- **ceremony 상태**: register/auth 중간 상태(`PasskeyRegistration`/`PasskeyAuthentication`)는 **휘발(DB-D5)** — rest-api `AppState`의 인메모리 맵(ceremony_id 키, 5분 만료, 서버측 보관 = 위변조 차단). RP = env `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_ORIGIN`(없으면 webauthn 엔드포인트 404).
+- crate 변경:
+  - `domain`: `webauthn`(NewWebAuthnCredential/WebAuthnCredential, opaque) + `WebAuthnRepository`(add/list/update) → Store 합류. (1.15→1.16)
+  - `storage`: **마이그레이션 V18** `webauthn_credentials` + PgStore impl(passkey jsonb↔text) + DB 테스트 +1. (1.16→1.17)
+  - `auth`: **`webauthn`**(`WebauthnService` — webauthn-rs 래퍼, P6) + webauthn-rs 의존 + **SoftPasskey 통합 테스트**(register→auth 서명검증 라운드트립, 헤드리스). (1.2→1.3)
+  - `rest-api`: `routes/webauthn`(4 엔드포인트) + `AppState`에 webauthn/ceremony 주입 + MemStore impl + **HTTP 통합 테스트**(SoftPasskey로 register→암호없는 login 전 계층 통과). (1.17→1.18)
+  - `server`: env로 `WebauthnService` 구성·주입. (1.6→1.7)
+  - `cli`: `webauthn-demo`(가입→passkey 등록→암호없는 로그인, SoftPasskey 헤드리스) + `webauthn-authenticator-rs` 의존. (1.16→1.17)
+- 문서(R2/P1): decisions **D19에 WebAuthn 구현 노트**, `02-schema.md` webauthn_credentials(passkey JSONB), `api/rest.md` 엔드포인트. TODO 체크.
+- **라이브 검증**: 단일노드 서버(RP=localhost) + `cli webauthn-demo` → 가입→passkey 등록(실 Postgres V18)→**암호 없는 로그인 → PASETO 토큰 발급** 확인.
+- seam: usernameless(discoverable) 로그인·어테스테이션 정책(현재 None)·멀티노드 ceremony 공유(start한 노드로 finish)는 후속.
+- 전 crate 테스트 합계 **163** (auth 19, rest-api 32[28+4], storage 19, domain 18, node 37, protocol 13, transport 11, cluster-config 4, gateway 8, actor-rt 2).
+
+## [1.40.0] - 2026-06-16
+### 새 기능 — SWIM 하드닝 (D45 후속, Phase 5)
+- **robust join (H1)** — `run_swim`이 startup에 `SwimJoin`을 1회만 보내 seed 핸드셰이크 전이면 유실되던 seam을 닫음. `Swim.bootstrapped`(seed의 SwimGossip/Ack 수신 시 set) 전까지 **매 tick join 재전송**. → 신규 노드가 **seed보다 먼저 기동해도** seed 등장 시 합류. **라이브 검증**(node3 동적 노드를 seed node1보다 먼저 띄움 → node1 등장 ~2초 후 풀메시 자가구성).
+- **round-robin probe (H2)** — 임의 probe 대상 선택을 **셔플 라운드로빈**으로 — 한 라운드에 각 멤버 정확히 1회 탐지(임의 선택의 탐지시간 변동 제거, SWIM 정석).
+- **주기적 membership anti-entropy (H3)** — 감염형 전파(bounded λ·logN) 누락 대비 — `anti_entropy_ticks`마다 **full-snapshot SwimGossip**을 임의 멤버에 push해 view 수렴 보강.
+- **SwimConfig env 노출 (H4)** — `SWIM_PING_TIMEOUT_MS`/`SWIM_PROBE_PERIOD_MS`/`SWIM_SUSPICION_TIMEOUT_MS`/`SWIM_INDIRECT_K`/`SWIM_GOSSIP_FANOUT`/`SWIM_DISSEMINATION_COUNT`/`SWIM_MAX_PIGGYBACK`/`SWIM_ANTI_ENTROPY_TICKS`/`SWIM_PROBE_INTERVAL_MS` 운영 튜닝.
+- crate: `node` swim 모듈(bootstrapped·probe_order·tick_count + `next_probe_target`/`anti_entropy`/`full_snapshot`) + 단위 테스트 +3(bootstrap·round-robin 1라운드 전멤버·anti-entropy push). (1.7→1.8) · `server` `swim_config_from_env` 헬퍼. (1.5→1.6)
+- 문서(R2): decisions D45 하드닝 노트 + seam 갱신(멤버 테이블 = 의도적 휘발 DB-D5 명시). 멤버 영속화는 **비대상**(DB-D5 위반).
+- 전 crate 테스트 합계 **159** (node 31+2+4 = 37, 나머지 동일).
+
+## [1.39.0] - 2026-06-16
+### 새 기능 — Phase 5 착수: SWIM gossip discovery (D45) + presence anti-entropy (D46)
+- **동적 클러스터 멤버십 (D45)** — 정적 config(D5) + 단순 PING/PONG(D23)을 **SWIM**으로 일반화. Q11의 마지막 갈래를 닫음.
+  - **3상태 + incarnation**: `Alive`/`Suspect`/`Dead` + incarnation 단조 카운터. 충돌 해소 = 높은 incarnation 우선, 같으면 `Dead>Suspect>Alive`. 자기에 대한 Suspect/Dead를 보면 incarnation을 올려 **Alive 반박(refute)**.
+  - **direct + indirect 탐침**: 주기 ping → 타임아웃 시 k명에게 `ping-req` 위임(간접 탐침, 오탐 감소) → 직접·간접 모두 실패해야 Suspect → suspicion 타임아웃 후 Dead.
+  - **감염형 전파(infection-style)**: 멤버 델타를 ping/ack/gossip에 피기백, 각 업데이트 유한 횟수(≈λ·logN)만 재전파.
+  - **동적 합류**: 신규 노드가 config의 **seed(introducer)**에게 `SwimJoin` → 전체 테이블 회신 + Alive 감염 전파 → 전 노드가 학습하고 **멤버 addr로 런타임 dial**(풀메시 자가구성).
+  - **동적 해시링**: `Router.ring`을 `RwLock`로 전환 — Alive 학습 시 `add_node`, Dead 확정 시 `remove_node`. Suspect는 신규 소유권 부여에서 제외(membership down-set 재사용). 일관 해싱이 그 노드 몫 Realm만 재배치(D6/D23).
+  - **경계(P2/P5)**: `node::swim::Swim`은 now_ms/rng 주입 **순수 상태머신** — `SwimAction`(송신/링변형/dial)으로 반환, 드라이버(`run_swim`)·server inbound가 IO 실행. → DST 결정론 재현.
+- **presence anti-entropy (D46)** — D42의 델타-only seam을 닫음. 신규 노드 합류를 SWIM이 감지하면 기존 노드가 **자기 호스팅 유저 presence 스냅샷**을 `PRESENCE_GOSSIP`로 push(신규 wire 불필요). `Presence::snapshot_local` 추가.
+- crate 변경:
+  - `protocol`: SWIM 5종 메시지(`SwimJoin`/`SwimPing`/`SwimAck`/`SwimPingReq`/`SwimGossip`) + `SwimMember` 델타, msg_type 0x0301~0x0305, 라운드트립 테스트 +4. (1.4→1.5)
+  - `node`: 신규 **`swim`** 모듈(상태머신 + `run_swim` 드라이버 + `apply_swim_actions`) + `Router` 동적 ring(`add/remove_ring_node`) + `Presence::snapshot_local`. 단위 테스트 +7, **DST 통합 `swim_dst.rs` +4**(동적 합류 수렴·재현성·파티션→Dead·재합류 멱등). (1.6→1.7)
+  - `transport`: `TcpTransport::connect_peer`/`is_connected`(런타임 동적 dial, 중복 방지) +1. (1.1→1.2)
+  - `cluster-config`: `NodeConfig.dynamic` 플래그(seed 합류 모드) +1. (1.0→1.1)
+  - `server`: `Swim` 배선 + `run_swim`(정적 `run_failure_detector` 대체) + `on_member_up` 훅(동적 dial + presence push) + run_inbound SWIM 처리. (1.4→1.5)
+- 문서(R2/P1): decisions **D45/D46 신설**, D5/Q11/§4-R/§6 갱신, `protocol/node-wire.md`(0x03xx SWIM 바디 명세). TODO 체크.
+- **라이브 검증(멀티노드 mTLS)**: node1·2 정적 mesh → **node3(dynamic, seed=node1) 합류** → node1 학습 → gossip으로 node2가 node3 발견·dial → **풀메시 자가구성** 확인. 동적 합류 node3에서 **CLI scenario PASS**(전 메시징 파이프라인 + 동적 ring 라우팅). node3 종료 시 피어가 이탈 감지·재연결.
+- seam: 클러스터 전체 동시 재시작 시 seed 부재면 부트스트랩 불가(seed 다중화로 완화)·멤버 테이블 휘발(DB-D5)·파티션 양쪽 상호 Dead(합의 부재 D33)·완전 anti-entropy(주기 digest)는 후속.
+- 전 crate 테스트 합계 **156** (protocol 13, node 28+2+4, transport 11, cluster-config 4, gateway 8, rest-api 30, auth 18, domain 18, actor-rt 2, storage 18 — DB 라이브 별도).
+
 ## [1.38.0] - 2026-06-16
 ### 새 기능
 - **메시지 시간 RANGE 파티셔닝 (Phase 4, D28)** — `messages`를 `PARTITION BY RANGE (id)`로 전환(드롭&재생성, 로컬 데이터 폐기).

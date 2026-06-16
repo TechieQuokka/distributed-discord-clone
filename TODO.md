@@ -1,7 +1,7 @@
 # TODO
 
 > 분산 Discord 클론 — 작업 추적. 설계 출처: [docs/architecture/decisions.md](docs/architecture/decisions.md).
-> 현재 단계: **Phase 4 완료** (v1.38.0 — 인증/봇방지 + 검색 Q10 + 스레드/포럼 D44 + 첨부 D37 + 웹훅 + 감사로그 + 메시지 RANGE 파티셔닝 D28). 다음: Phase 5 스트레치 또는 frontend(D30). 로드맵 = D §4-R. 이어서 → RESUME.md.
+> 현재 단계: **Phase 5 진행** (v1.45.0 — SWIM D45/D46 + WebAuthn D19 + **이벤트 소싱 D48 + CRDT 오프라인 동기화 D49 + Voice 시그널링 설계 D47 + 하드닝(idle/dnd·파티션 사전생성)**). Phase 0~4 완료. Phase 5 잔여: 세부 하드닝(크로스노드 RESUME·D35 warmup·usernameless 등) · 액터 supervisor(Q7). MinIO는 **범위 제외**(사용자 결정 — 로컬 테스트 전용, BlobStore 포트는 유지). frontend(D30)는 최후순위. 로드맵 = D §4-R. 이어서 → RESUME.md.
 
 범례: `[ ]` 미착수 · `[~]` 진행중 · `[x]` 완료
 
@@ -104,12 +104,12 @@
 
 ## Phase 5 — 스트레치
 
-- [ ] WebAuthn/Passkeys (D19)
-- [ ] CRDT 오프라인 동기화
-- [ ] gossip discovery (SWIM, Q11)
-- [ ] 이벤트 소싱 (선택, D23)
-- [ ] Voice 시그널링 (미디어 제외, D21)
-- [ ] MinIO 첨부 저장소 업그레이드 (D37)
+- [x] WebAuthn/Passkeys (D19)
+- [x] CRDT 오프라인 동기화  # 상태기반 CvRDT(D49): domain::crdt 순수 툴킷(LwwRegister/LwwMap/OrSet/PnCounter, merge 법칙 8테스트) + 적용=유저 동기화 문서(LWW-Map). CrdtRepository 포트, storage LWW 가드 upsert(V21 user_crdt_entries), REST /users/@me/sync. 라이브 검증(2기기 오프라인 편집→충돌없이 수렴+툼스톤). OrSet/PnCounter 배선·WS push는 seam
+- [x] gossip discovery (SWIM, Q11)
+- [x] 이벤트 소싱 (선택, D23)  # 가산형 구현(D48): messages(진실) 위에 append-only realm_events(V20) + 순수 RealmProjection(domain, 결정론 fold) = CQRS. EventLogRepository 포트, dispatch가 MessageCreated append(단일 소비자 D24→seq 경합 없음). 라이브 검증(scenario→로그 1건). messages 비파괴. 멤버/삭제 생산자·트랜잭션 무결성·스냅샷은 seam
+- [x] Voice 시그널링 (미디어 제외, D21)  # 설계 전용(D47, protocol/voice-signaling.md): 시그널링=제어 평면만, 미디어(WebRTC/SFU/SRTP)는 D21 경계 밖. voice state=Realm 휘발 상태(D12/D42 동형)→REALM_FANOUT 재사용, op 4 + 권한 CONNECT/SPEAK. 코드 미구현(사용자 결정: Voice=문서만)
+- [~] ~~MinIO 첨부 저장소 업그레이드 (D37)~~ **범위 제외**(사용자 결정 2026-06-16): 로컬 테스트 전용 + 확장 의사 없음 → MinIO 불필요. `LocalFsBlobStore`로 충분. **`BlobStore` 포트는 유지**(domain↔IO 경계 P2, MinIO 발판 아님). 필요해지면 같은 포트로 언제든 추가 가능(D37)
 
 ---
 
@@ -118,4 +118,4 @@
 - [ ] Q7. 액터 supervisor/재시작 전략 (Phase 2)
 - [x] Q9. CLI 시나리오 스크립트 포맷 (Phase 1) — `scenario` 서브커맨드로 해결
 - [x] Q10. 검색 구현 세부 (Phase 4) — Postgres FTS(tsvector 생성컬럼+GIN, websearch_to_tsquery), 길드 검색 + 채널 권한 필터로 해결
-- [ ] Q11. gossip discovery + 전역 presence (Phase 3/5)
+- [x] Q11. gossip discovery + 전역 presence (Phase 3/5) — presence=D42/D43, SWIM 동적 합류=D45, anti-entropy=D46

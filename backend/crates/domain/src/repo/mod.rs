@@ -5,7 +5,9 @@ use core::future::Future;
 use crate::attachment::{Attachment, NewAttachment};
 use crate::audit::{AuditEntry, NewAuditEntry};
 use crate::channel::{Channel, NewChannel};
+use crate::crdt::{CrdtEntry, LwwMap};
 use crate::dm::{DmChannel, NewDm, NewGroupDm, RealmInfo};
+use crate::event::{RealmEventKind, RealmEventRecord};
 use crate::guild::{Guild, NewGuild};
 use crate::id::{
     AttachmentId, ChannelId, MessageId, RealmId, RefreshTokenId, RoleId, UserId, WebhookId,
@@ -20,6 +22,7 @@ use crate::relationship::{RelationKind, Relationship};
 use crate::role::{NewRole, Role};
 use crate::thread::{NewThread, Thread};
 use crate::user::{NewUser, User};
+use crate::webauthn::{NewWebAuthnCredential, WebAuthnCredential};
 use crate::webhook::{NewWebhook, Webhook};
 
 #[derive(Debug, thiserror::Error)]
@@ -494,6 +497,68 @@ pub trait AuditRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<AuditEntry>, RepoError>> + Send;
 }
 
+/// WebAuthn 자격증명 저장소 port (Phase 5, D19, 스키마 `webauthn_credentials` V18).
+/// crypto/ceremony는 auth(webauthn-rs, P6); 여기선 자격증명(opaque passkey_json) 보관만.
+pub trait WebAuthnRepository: Send + Sync {
+    /// 등록 ceremony finish 후 자격증명 저장. credential_id 중복이면 `Conflict`.
+    fn add_credential(
+        &self,
+        c: &NewWebAuthnCredential,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    /// 유저의 등록 자격증명 목록 (인증 ceremony 로드 + 등록 exclude).
+    fn list_credentials(
+        &self,
+        user: UserId,
+    ) -> impl Future<Output = Result<Vec<WebAuthnCredential>, RepoError>> + Send;
+
+    /// counter 증가 등으로 갱신된 passkey 재저장 (credential_id로 매칭). 없으면 no-op.
+    fn update_credential(
+        &self,
+        credential_id: &[u8],
+        passkey_json: &str,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+}
+
+/// 이벤트 소싱 로그 port (Phase 5, D23/D48, 스키마 `realm_events` V20). append-only 도메인 사실 로그.
+///
+/// per-realm 단조 seq를 어댑터가 부여한다. **단일 직렬 소비자**(dispatch 드라이버, D24)가 append
+/// 하므로 seq 경합 없음(nonce 멱등 D34와 같은 앱레벨 직렬화 논리). 재생은 `RealmProjection`이 fold.
+pub trait EventLogRepository: Send + Sync {
+    /// (realm, kind) 추가 → 부여된 per-realm seq 반환(1부터 단조).
+    fn append_event(
+        &self,
+        realm: RealmId,
+        kind: &RealmEventKind,
+    ) -> impl Future<Output = Result<u64, RepoError>> + Send;
+
+    /// `after_seq` 이후의 이벤트를 seq 오름차순으로 (rehydrate/증분 재생, D23/D35).
+    fn replay_events(
+        &self,
+        realm: RealmId,
+        after_seq: u64,
+    ) -> impl Future<Output = Result<Vec<RealmEventRecord>, RepoError>> + Send;
+}
+
+/// CRDT 오프라인 동기화 저장소 port (Phase 5, D49, 스키마 `user_crdt_entries` V21).
+///
+/// 유저 동기화 문서 = 키별 LWW(`LwwMap`). 병합 권위는 domain(`LwwMap`)이고, 어댑터는 LWW 가드
+/// upsert((ts,node) 큰 것 채택)로 영속. 여러 기기가 오프라인 편집 후 push해도 충돌 없이 수렴.
+pub trait CrdtRepository: Send + Sync {
+    /// 유저 동기화 문서 전체 로드 (LwwMap 재구성, 툼스톤 포함).
+    fn load_user_doc(
+        &self,
+        user: UserId,
+    ) -> impl Future<Output = Result<LwwMap, RepoError>> + Send;
+
+    /// 들어온 엔트리를 LWW로 병합(upsert) 후 병합된 문서를 반환. 멱등(같은 엔트리 재전송 무해).
+    fn merge_user_doc(
+        &self,
+        user: UserId,
+        entries: &[CrdtEntry],
+    ) -> impl Future<Output = Result<LwwMap, RepoError>> + Send;
+}
+
 /// 모든 저장소 port를 한 타입이 구현 — 조합 루트에서 제네릭 1개로 주입 (제네릭 폭발 방지).
 pub trait Store:
     UserRepository
@@ -512,6 +577,9 @@ pub trait Store:
     + AttachmentRepository
     + WebhookRepository
     + AuditRepository
+    + WebAuthnRepository
+    + EventLogRepository
+    + CrdtRepository
 {
 }
 
@@ -532,5 +600,8 @@ impl<T> Store for T where
         + AttachmentRepository
         + WebhookRepository
         + AuditRepository
+        + WebAuthnRepository
+        + EventLogRepository
+        + CrdtRepository
 {
 }

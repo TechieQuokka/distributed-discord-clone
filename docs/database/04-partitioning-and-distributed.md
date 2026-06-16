@@ -88,4 +88,10 @@ CREATE INDEX ix_messages_fts ON messages USING GIN (content_tsv);
 
 ## 6. 마이그레이션 운영
 - `sqlx migrate` — 순번 SQL 파일. Phase 0부터 버전 관리.
-- 파티션 신규 월 생성은 별도 유지 작업(런처/스케줄). 로컬 study에선 수동/스크립트로 충분.
+- **신규 월 파티션 사전 생성 (구현됨 v1.43, V19)**: V17은 2026_06/_07 + DEFAULT만 만든다 → 시간이 흐르면 새 달 메시지가 DEFAULT로 쌓여 시간 지역성(§2)이 무너진다. **달력 계산을 Postgres에 위임**한 멱등 함수 `ensure_message_partitions(months_ahead int DEFAULT 2)`(plpgsql)가 `(month_start_ms - EPOCH_MS) << 22` 경계(§2와 동일)로 월별 파티션을 `to_regclass` 가드로 생성(이미 있으면 스킵).
+```sql
+-- V19. UTC 월 경계로 이번 달 + N개월 파티션 보장(멱등).
+SELECT ensure_message_partitions(2);   -- 새로 만든 파티션 수 반환
+```
+- **server가 startup에 `PgStore::ensure_message_partitions(2)` 호출**(이번 달 + 2개월). 미래 달은 DEFAULT에 행이 없어 안전. 자동 스케줄(cron)은 아님 — 로컬 study에선 startup 1회로 충분(서버를 주기 재시작하거나 수동 호출).
+- seam: DEFAULT에 이미 미래-id 행이 쌓였다면 그 달 파티션 생성이 실패(미래 id 메시지는 비현실적이라 무시).

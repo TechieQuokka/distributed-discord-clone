@@ -64,16 +64,19 @@ CREATE TABLE mfa_backup_codes (
     PRIMARY KEY (user_id, code_hash)
 );
 
--- WebAuthn/Passkeys (Phase 5 스트레치)
+-- WebAuthn/Passkeys (구현됨 V18, Phase 5, D19)
+-- ※ 구현 단순화: webauthn-rs(P6)의 `Passkey`(공개키+counter 내장)를 **`passkey JSONB`로 불투명 저장**.
+--   원안의 분해 컬럼(public_key/sign_count)은 라이브러리가 Passkey 내부에 캡슐화 → 직렬화 1개로 대체.
+--   counter 증가 시 passkey 재직렬화 저장(클론 탐지는 라이브러리). credential_id는 exclude/조회용.
 CREATE TABLE webauthn_credentials (
-    id            BIGINT PRIMARY KEY,
+    id            BIGINT PRIMARY KEY,                  -- Snowflake
     user_id       BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    credential_id BYTEA NOT NULL,
-    public_key    BYTEA NOT NULL,
-    sign_count    BIGINT NOT NULL DEFAULT 0,
+    credential_id BYTEA NOT NULL,                       -- 자격증명 id (exclude/조회)
+    passkey       JSONB NOT NULL,                       -- webauthn-rs Passkey 직렬화(공개키+counter)
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX uq_webauthn_cred ON webauthn_credentials (credential_id);
+CREATE INDEX ix_webauthn_user ON webauthn_credentials (user_id);
 ```
 
 ---
@@ -368,6 +371,21 @@ CREATE TABLE webhooks (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ※ 구현됨 (V20, D48 이벤트 소싱): append-only 도메인 사실 로그. messages(엔티티 진실)와 **별개**의
+--   사실 스트림(CQRS). per-realm 단조 seq(단일 직렬 소비자 D24가 부여 → 경합 없음). 페이로드는 jsonb
+--   대신 타입화된 nullable bigint 슬롯(storage serde 무의존). code = domain RealmEventKind::code().
+--   재생은 domain RealmProjection이 fold(상태 = 이벤트의 함수). realm_id는 논리 키(FK 생략 = 로그 독립).
+CREATE TABLE realm_events (
+    realm_id   BIGINT   NOT NULL,
+    seq        BIGINT   NOT NULL,                        -- per-realm 단조(1부터)
+    code       SMALLINT NOT NULL,                        -- 1=MsgCreated 2=MsgDeleted 3=MemberJoined 4=MemberLeft
+    message_id BIGINT,                                   -- 메시지 이벤트
+    channel_id BIGINT,                                   -- 메시지 이벤트
+    user_id    BIGINT,                                   -- 멤버 이벤트 / MsgCreated author
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (realm_id, seq)
+);
+
 -- 읽음 상태 / 미읽음 카운트 (Discord UX 필수)
 CREATE TABLE read_states (
     user_id              BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -375,6 +393,18 @@ CREATE TABLE read_states (
     last_read_message_id BIGINT,
     mention_count        INT NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, channel_id)
+);
+
+-- ※ 구현됨 (V21, D49 CRDT 오프라인 동기화): 유저 동기화 문서 = 키별 LWW-Register.
+--   여러 기기가 오프라인 편집 후 push해도 LWW 가드 upsert((ts,node) 큰 것 채택)로 충돌 없이 수렴.
+--   value NULL = 툼스톤(삭제도 LWW). domain `LwwMap`의 영속형. REST /users/@me/sync.
+CREATE TABLE user_crdt_entries (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key     TEXT   NOT NULL,
+    value   TEXT,                                       -- NULL = 툼스톤(삭제)
+    ts_ms   BIGINT NOT NULL,                            -- LWW dot.0 (편집 시각 ms)
+    node_id BIGINT NOT NULL,                            -- LWW dot.1 (복제본/기기 id, 타이브레이크)
+    PRIMARY KEY (user_id, key)
 );
 ```
 

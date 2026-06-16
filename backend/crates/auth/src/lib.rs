@@ -9,9 +9,11 @@ pub mod pow;
 pub mod refresh;
 pub mod token;
 pub mod totp;
+pub mod webauthn;
 
 pub use error::AuthError;
 pub use password::{hash_password, verify_password};
 pub use pow::PowKeys;
 pub use refresh::{generate_refresh, hash_refresh};
 pub use token::TokenKeys;
+pub use webauthn::{WebauthnService, cred_id_bytes, user_uuid};

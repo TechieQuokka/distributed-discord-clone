@@ -81,7 +81,7 @@ offset  size  field
 | `0x00xx` | 제어/핸드셰이크 |
 | `0x01xx` | Realm 라우팅/팬아웃 |
 | `0x02xx` | Presence/gossip + 클러스터 유저 라우팅 |
-| `0x03xx` | 클러스터/링 |
+| `0x03xx` | 클러스터 멤버십 (SWIM 동적 합류/장애감지, D45) |
 
 | msg_type | 이름 | 방향 | 설명 |
 |---|---|---|---|
@@ -95,9 +95,13 @@ offset  size  field
 | 0x0104 | `REALM_EMIT` | →소유노드 | 비-메시지 이벤트(멤버 변동 등) 팬아웃을 소유 노드에 위임 (D39) |
 | 0x0110 | `SUBSCRIBE` | →소유노드 | 유저 U(노드 N)가 Realm R 구독 등록 (D12) |
 | 0x0111 | `UNSUBSCRIBE` | →소유노드 | 구독 해제 |
-| 0x0201 | `PRESENCE_GOSSIP` | 양방향 | presence 델타 전파 (Phase 3, D12) |
+| 0x0201 | `PRESENCE_GOSSIP` | 양방향 | presence 델타 전파 (Phase 3, D12). **D46**: 신규 노드 합류 시 anti-entropy 스냅샷 push에도 재사용 |
 | 0x0202 | `USER_DELIVER` | →호스팅 노드 | Realm 무관 유저 이벤트(친구·읽음 등)를 대상 유저 호스팅 노드에 **타깃** 배달 (D43) |
-| 0x0301 | `RING_UPDATE` | 양방향 | 해시링 멤버십 변경 (Phase 5 동적, gossip) |
+| 0x0301 | `SWIM_JOIN` | →seed | 신규 노드 합류 요청 (introducer에게 자기 addr/incarnation 전달, D45) |
+| 0x0302 | `SWIM_PING` | 양방향 | SWIM 주기 탐침 (멤버 델타 피기백, D45) |
+| 0x0303 | `SWIM_ACK` | 양방향 | SWIM_PING/PING_REQ 응답 (멤버 델타 피기백) |
+| 0x0304 | `SWIM_PING_REQ` | →대리 노드 | 간접 탐침 위임 ("타깃을 대신 ping해 달라", 오탐 감소) |
+| 0x0305 | `SWIM_GOSSIP` | 양방향 | 멤버 상태 변화 감염형 전파 배치 + join 응답(전체 테이블) (D45) |
 
 ---
 
@@ -156,6 +160,34 @@ user_ids : Vec<u64>   # 이 수신 노드에서 배달할 대상 유저들
 ```
 - **Realm 무관 유저 이벤트**(친구·차단·읽음)의 크로스노드 배달. presence와 달리 **broadcast가 아니라 타깃 전송**: 송신 노드가 `Presence` 디렉터리(D42, user→호스팅 노드 집합)로 각 대상 유저의 호스팅 노드를 찾아 **그 노드에만** 보낸다(로컬 노드는 `Hub`로 직접 배달). 수신 노드는 `user_ids`를 자기 로컬 세션에 `PRESENCE_GOSSIP`과 같은 자리(server inbound 루프)에서 `Hub::deliver`로 흘린다. 로컬 세션 없는 유저는 자동 스킵(stale 디렉터리 무해).
 
+### SWIM 멤버십 (0x0301~0x0305) — 구현됨 (Phase 5, D45)
+
+공통 멤버 델타 `SwimMember` (피기백/전파 단위):
+```
+node_id     : u64
+addr        : String     # "host:port" — 신규 노드를 런타임 dial하기 위한 주소
+incarnation : u64        # 노드 소유 단조 카운터 (refute/충돌해소)
+state       : u8         # 0=Alive 1=Suspect 2=Dead
+```
+충돌 해소(수신 시 합병): **높은 incarnation 우선**, 같으면 `Dead > Suspect > Alive`. 자기 자신에 대한
+Suspect/Dead를 보면 incarnation을 올려 Alive로 반박(refute) 전파.
+
+```
+SWIM_JOIN (0x0301)        addr:String, incarnation:u64
+    # 신규 노드 → seed. (node_id는 헤더 src_node_id). seed는 전체 멤버를 SWIM_GOSSIP로 회신 + 신규를 Alive로 전파.
+SWIM_PING (0x0302)        seq:u64, updates:Vec<SwimMember>
+SWIM_ACK  (0x0303)        seq:u64, updates:Vec<SwimMember>
+    # seq로 ping↔ack 짝. updates = 피기백 멤버 델타(감염형 전파).
+SWIM_PING_REQ (0x0304)    seq:u64, target:u64, target_addr:String, updates:Vec<SwimMember>
+    # 직접 ping 실패 시 k명에게 위임 → 받은 노드가 target을 ping하고 그 ack를 요청자에게 중계.
+SWIM_GOSSIP (0x0305)      updates:Vec<SwimMember>
+    # 멤버 상태 변화 배치 확산 + join 응답(전체 테이블). 각 업데이트는 유한 횟수(≈λ·logN)만 재전파.
+```
+- **동적 링**: Alive(신규) 학습 → `ring.add_node` + 런타임 dial. Dead 확정 → `ring.remove_node`. Suspect는
+  링에 남기되 신규 소유권 부여 제외. → 일관 해싱이 그 노드 몫 Realm만 재배치(D6/D23).
+- **presence anti-entropy(D46)**: 신규 Alive 학습 시 server가 자기 호스팅 유저 presence를 `PRESENCE_GOSSIP`(0x0201)로 신규 노드에 push.
+- **결정론(D25)**: 상태머신은 now_ms 주입 순수 로직 → SimNetwork+ManualClock로 join/suspect→dead/refute/partition 재현.
+
 ### `REALM_COMMAND_RESULT` (0x0102)
 ```
 origin_session_id : u64
@@ -183,7 +215,7 @@ epoch        : u64     # 노드 시작 시각(ms) — 재시작 감지/failure d
 5. 이후 PING/PONG로 생존 확인
 ```
 - **failure detection**: PONG 미수신 N회 → 피어 down 판정 → 해당 노드 소유 Realm을 링에서 재배치(D23) → 새 소유 노드가 Postgres에서 rehydrate.
-- (Phase 5) 동적 합류는 `RING_UPDATE` + gossip(SWIM, Q11).
+- **(Phase 5, D45) 동적 합류**: 신규 노드가 config의 seed에게 `SWIM_JOIN` → SWIM이 멤버 델타를 감염형 전파 → 각 노드가 멤버 addr로 신규 노드를 런타임 dial(풀메시 자가구성). 정적 config 전체목록 경로도 fallback 유지.
 
 ---
 
@@ -218,5 +250,5 @@ epoch        : u64     # 노드 시작 시각(ms) — 재시작 감지/failure d
 
 ## 9. 미정/후속
 - 압축(zstd) flag 활성 (후속 최적화).
-- `RING_UPDATE`/gossip 상세 (Phase 5, Q11).
+- SWIM 튜닝(probe interval/k/suspicion timeout/λ) 운영 파라미터화는 후속.
 - ACK/재전송 정책 세부 (REQUIRES_ACK flag 운용).

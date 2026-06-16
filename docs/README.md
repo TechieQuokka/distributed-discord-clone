@@ -9,7 +9,7 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 
 | 순서 | 문서 | 내용 |
 |---|---|---|
-| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D44)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
+| 1 | [architecture/decisions.md](architecture/decisions.md) | **결정 원장 (D1~D49)** — 무엇을 왜 정했나. 모든 설계의 출처(source of truth) |
 | - | [design-discussion.md](design-discussion.md) | **설계 토론 기록** — 어떤 선택지를 두고 어떻게 논쟁해 정했나 (서사) |
 | 2 | [database/01-overview.md](database/01-overview.md) | DB 철학·규약·핵심 모델링 결정 |
 | 3 | [database/02-schema.md](database/02-schema.md) | 전체 테이블 DDL (도메인별) |
@@ -42,6 +42,7 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 
 ### Protocol (노드 간 와이어)
 - [protocol/node-wire.md](protocol/node-wire.md) — 수제 바이트 프로토콜 (프레이밍·헤더·메시지·핸드셰이크)
+- [protocol/voice-signaling.md](protocol/voice-signaling.md) — Voice 시그널링 설계(제어 평면만, 미디어 제외 D21/D47)
 
 ---
 
@@ -61,4 +62,4 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 비범위(명시): 합의(Raft) 없음, Voice 미디어 없음
 ```
 
-> 현재 단계: **Phase 4 완료** (v1.38) — 인증/봇방지(PoW D18·rate limit D32·TOTP D19) + 전문검색(Q10) + 스레드/포럼(D44) + 파일첨부(D37) + 웹훅 + 감사로그 + 메시지 RANGE 파티셔닝(D28). 다음: Phase 5 스트레치 또는 frontend(D30). (이어서 → [RESUME.md](../RESUME.md))
+> 현재 단계: **Phase 5 대거 진행** (v1.45) — SWIM(D45/D46) · WebAuthn(D19) · **이벤트 소싱(D48, 가산형 CQRS)** · **CRDT 오프라인 동기화(D49, 상태기반 CvRDT)** · **Voice 시그널링 설계(D47, 미디어 제외)** · 하드닝(idle/dnd op3·신규 월 파티션 사전생성). Phase 0~4 완료. 잔여: 세부 하드닝 · 크로스노드 RESUME · 액터 supervisor(Q7). MinIO는 범위 제외(D37, 로컬 테스트 전용·확장 의사 없음 — BlobStore 포트는 유지). frontend(D30)는 최후순위. (이어서 → [RESUME.md](../RESUME.md))

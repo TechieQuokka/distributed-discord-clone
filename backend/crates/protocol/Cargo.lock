@@ -10,7 +10,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "domain"
-version = "1.15.0"
+version = "1.18.0"
 dependencies = [
  "bitflags",
  "thiserror",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "domain",
  "thiserror",

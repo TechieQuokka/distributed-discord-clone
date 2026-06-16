@@ -109,6 +109,19 @@ impl Presence {
     pub fn is_online(&self, user: u64) -> bool {
         self.get(user) != Status::Offline
     }
+
+    /// 이 노드가 호스팅하는 유저들의 (user, status) 스냅샷 (D46 presence anti-entropy).
+    /// 신규 노드 합류 시 server가 이 스냅샷을 `PRESENCE_GOSSIP`로 push → 신규 노드가 과거 전이도 학습.
+    pub fn snapshot_local(&self, local_node: u64) -> Vec<(u64, Status)> {
+        let g = self.inner.lock().unwrap();
+        let mut v: Vec<(u64, Status)> = g
+            .iter()
+            .filter(|(_, e)| e.nodes.contains(&local_node))
+            .map(|(user, e)| (*user, e.status))
+            .collect();
+        v.sort_by_key(|(u, _)| *u);
+        v
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +153,17 @@ mod tests {
         assert_eq!(p.nodes_for(1), vec![20], "노드 하나 빠지면 디렉터리에서 제거");
         p.clear(1, 20);
         assert!(p.nodes_for(1).is_empty(), "전부 빠지면 오프라인=빈 디렉터리");
+    }
+
+    #[test]
+    fn snapshot_local_lists_locally_hosted(){
+        let p = Presence::new();
+        p.set(1, 10, Status::Online);
+        p.set(2, 10, Status::Idle);
+        p.set(3, 20, Status::Online); // 다른 노드 호스팅
+        let snap = p.snapshot_local(10);
+        assert_eq!(snap, vec![(1, Status::Online), (2, Status::Idle)], "노드10 호스팅분만");
+        assert!(p.snapshot_local(99).is_empty(), "호스팅 없는 노드는 빈 스냅샷");
     }
 
     #[test]

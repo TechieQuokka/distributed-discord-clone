@@ -53,7 +53,8 @@ pub struct Router<T: NodeTransport> {
     local_node_id: u64,
     /// 노드당 단일 Snowflake generator — 모든 Realm 액터에 주입 (D11 불변식).
     snowflakes: Arc<SnowflakeGenerator>,
-    ring: HashRing,
+    /// 해시링 — **런타임 가변(D45)**: SWIM이 노드 합류 시 add, 사망 시 remove. owner/peer_ids가 읽음.
+    ring: std::sync::RwLock<HashRing>,
     /// 피어 생사 뷰 — down 노드는 소유권 탐색에서 제외(자동 failover, D23).
     membership: Arc<Membership>,
     /// 주입된 시계 — Realm 액터에 전달. DST에선 SimClock(ManualClock)로 결정론 (D25).
@@ -77,7 +78,7 @@ impl<T: NodeTransport> Router<T> {
         Self {
             local_node_id,
             snowflakes,
-            ring,
+            ring: std::sync::RwLock::new(ring),
             membership: Arc::new(Membership::new()),
             clock,
             transport,
@@ -91,9 +92,19 @@ impl<T: NodeTransport> Router<T> {
         &self.membership
     }
 
-    /// Realm 소유 노드 — down 노드(D23)를 건너뛴 일관 해싱 소유권.
+    /// Realm 소유 노드 — down/suspect 노드(D23/D45)를 건너뛴 일관 해싱 소유권.
     pub fn owner(&self, realm: RealmId) -> Option<u64> {
-        self.ring.owner_excluding(realm.0.raw(), &self.membership.down_set())
+        self.ring.read().unwrap().owner_excluding(realm.0.raw(), &self.membership.down_set())
+    }
+
+    /// 링에 노드 추가 (D45 — SWIM이 Alive 학습 시). 이미 있으면 멱등.
+    pub fn add_ring_node(&self, node: u64) {
+        self.ring.write().unwrap().add_node(node);
+    }
+
+    /// 링에서 노드 제거 (D45 — SWIM이 Dead 확정 시). 그 노드 몫 Realm만 재배치(일관 해싱).
+    pub fn remove_ring_node(&self, node: u64) {
+        self.ring.write().unwrap().remove_node(node);
     }
 
     pub fn is_local(&self, realm: RealmId) -> bool {
@@ -117,7 +128,7 @@ impl<T: NodeTransport> Router<T> {
 
     /// 링의 다른 노드 id 목록 (자기 제외). gossip 브로드캐스트 대상.
     pub fn peer_ids(&self) -> Vec<u64> {
-        self.ring.node_ids().into_iter().filter(|n| *n != self.local_node_id).collect()
+        self.ring.read().unwrap().node_ids().into_iter().filter(|n| *n != self.local_node_id).collect()
     }
 
     /// 모든 피어에 메시지 브로드캐스트 (presence gossip 등, 풀메시 D4). 전송 실패는 무시(fire-and-forget).
@@ -368,6 +379,12 @@ impl<T: NodeTransport> Router<T> {
             NodeMessage::PresenceGossip { .. } => Ok(None),
             // UserDeliver(D43)도 server inbound 루프가 직접 처리(Hub 필요) — node 코어는 Hub를 모름(P2).
             NodeMessage::UserDeliver { .. } => Ok(None),
+            // SWIM 멤버십(D45)은 server inbound 루프가 `Swim::handle`로 직접 처리(Swim 상태 필요).
+            NodeMessage::SwimJoin { .. }
+            | NodeMessage::SwimPing { .. }
+            | NodeMessage::SwimAck { .. }
+            | NodeMessage::SwimPingReq { .. }
+            | NodeMessage::SwimGossip { .. } => Ok(None),
             NodeMessage::Pong | NodeMessage::Hello { .. } | NodeMessage::HelloAck { .. } => Ok(None),
         }
     }
