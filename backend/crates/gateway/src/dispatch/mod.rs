@@ -130,7 +130,18 @@ pub async fn run_dispatch<S: Store + 'static, T: NodeTransport>(
                 (realm, "MESSAGE_CREATE".to_string(), payload, targets)
             }
             // 비-메시지 이벤트: persist 없이 그대로 (payload는 REST 엣지가 이미 직렬화, D39).
-            RealmEvent::Broadcast { realm, t, payload, targets } => (realm, t, payload, targets),
+            // 이벤트 소싱(D48/E2): 사실(fact)이 동반되면 append_event. **단일 직렬 소비자**(이 루프)만
+            // append하므로 per-realm seq 경합 없음(D24, MessageCreated와 동일 보장). 멤버 입퇴장/메시지
+            // 삭제 등이 여기로 흐른다(로컬 소유는 직접, 원격은 REALM_EMIT 와이어 fact로). append 실패는
+            // warn 후 계속(배달 안 막음 — 진실은 members/messages 테이블, 로그는 보조 E1).
+            RealmEvent::Broadcast { realm, t, payload, fact, targets } => {
+                if let Some(kind) = fact {
+                    if let Err(e) = store.append_event(realm, &kind).await {
+                        tracing::warn!(error = %e, t = %t, "event log append (broadcast fact) failed (continuing)");
+                    }
+                }
+                (realm, t, payload, targets)
+            }
         };
 
         // 팬아웃 대상 산출 (D12) + 로컬 세션 배달.

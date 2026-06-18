@@ -3,7 +3,7 @@
 > Discord 클론 — 공부 + 포트폴리오용. 로컬 전용, 이론 확립.
 > 철학: **"공부는 실전처럼"** — 실제로 수만 명을 붙이진 않지만, *수만 동접을 감당할 수 있는 구조*로 설계하고 로컬 시뮬레이션으로 증명한다.
 >
-> 최종 갱신: 2026-06-16 (**Phase 5 대거 진행, v1.45**: SWIM D45/D46 · WebAuthn D19 · **이벤트 소싱 D48**(가산형 CQRS) · **CRDT 오프라인 동기화 D49**(상태기반 CvRDT) · **Voice 시그널링 설계 D47**(미디어 제외) · 하드닝(idle/dnd op3·신규 월 파티션 사전생성). MinIO는 범위 제외(D37, 로컬 테스트 전용). 잔여=세부 하드닝·크로스노드 RESUME·액터 supervisor)
+> 최종 갱신: 2026-06-18 (**Phase 5 완료, v1.50**: SWIM D45/D46 · WebAuthn D19(usernameless 포함) · 이벤트 소싱 D48(멤버/삭제 생산자 포함) · CRDT D49 · **Voice 제어 평면 D47**(미디어 제외 D21) · **액터 supervisor Q7/D50** · **D35 last_message_id warmup** · **크로스노드 RESUME=세션 마이그레이션 D24** · 하드닝(idle/dnd op3·파티션 사전생성). MinIO는 범위 제외(D37). 잔여 하드닝 7건 모두 마감. 다음 = frontend D30. 테스트 187)
 
 ---
 
@@ -164,7 +164,9 @@
   - **저장**: 자격증명은 `webauthn_credentials`(V18) — `credential_id BYTEA UNIQUE`(exclude/조회) + **`passkey JSONB`**(webauthn-rs `Passkey` 직렬화, 공개키+counter 내장). 원안의 분해 컬럼(public_key/sign_count) 대신 라이브러리 단위(Passkey)를 불투명 저장(02-schema 갱신). domain은 **opaque `passkey_json` 문자열**로만 알아 webauthn-rs 무의존(P2). 신규 포트 `WebAuthnRepository`(add/list/update_counter) → Store 합류.
   - **ceremony 상태**: register/auth의 `PasskeyRegistration`/`PasskeyAuthentication` 중간 상태는 **휘발(DB-D5)** — rest-api `AppState`의 인메모리 맵(`ceremony_id → 상태 + 만료`)에 보관. 서버측 보관(클라 위변조 차단). **멀티노드 seam**: finish는 start한 같은 노드로(상태 노드-로컬, 크로스노드 RESUME과 동류 seam).
   - **흐름**: 등록(인증된 유저) `POST /auth/webauthn/register/{start,finish}` → finish 시 Passkey 저장. 로그인 `POST /auth/webauthn/login/{start,finish}`(start는 username으로 등록 자격증명 로드, finish는 서명 검증 후 **access+refresh 발급** = 암호 없는 로그인). counter 증가 시 재저장(클론 탐지는 라이브러리). RP = `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_ORIGIN` env(기본 localhost). webauthn 미설정 노드는 404(기능 비활성).
-  - **검증**: auth SoftPasskey 통합 테스트(register→auth 서명 검증 라운드트립) + rest-api MemStore 엔드포인트 + cli `webauthn-register`/`webauthn-login` 라이브 e2e. seam: usernameless(discoverable) 로그인·어테스테이션 정책(현재 None)·멀티노드 ceremony 공유는 후속.
+  - **검증**: auth SoftPasskey 통합 테스트(register→auth 서명 검증 라운드트립) + rest-api MemStore 엔드포인트 + cli `webauthn-register`/`webauthn-login` 라이브 e2e.
+  - **Usernameless(discoverable) 로그인 (v1.49)**: username 없이 — 인증기가 resident key로 유저를 고른다. `start_discoverable_auth`(challenge만, 유저 미상) → 클라가 resident 자격증명으로 서명 → `identify_discoverable`(응답의 user handle=Uuid → `uuid_to_snowflake`로 유저 식별) → 그 유저 passkey로 `finish_discoverable_auth` → 토큰 발급. webauthn-rs **`conditional-ui` feature**(discoverable API), P6 위임 유지. REST `/auth/webauthn/login/discoverable/{start,finish}`, ceremony는 유저 미상의 `Ceremony::Discoverable`(휘발). **검증 seam**: 전체 서명 라운드트립은 resident-key 탐색이 필요해 SoftPasskey(헤드리스) 미지원 → 실제 인증기 영역. 헤드리스 테스트는 challenge 발급 + user handle↔Snowflake 무손실 왕복까지.
+  - seam: 어테스테이션 정책(현재 None)·멀티노드 ceremony 공유(start/finish 같은 노드 — 크로스노드 RESUME과 동류 seam)는 후속.
 
 ### D20. 입력·세션 하이젠
 - **SQL = 파라미터 바인딩만** (문자열 조립 금지).
@@ -221,7 +223,8 @@
 - **현황(Phase 2, 구현됨)**: per-session seq + bounded 재생 버퍼(기본 256)를 **Hub**(세션 소유 노드)가 보유.
   소켓 끊김 = `detach`(live sender만 분리, 버퍼·구독·seq 유지, grace 90s) → RESUME이 `resume_token`(CSPRNG, D20) +
   last seq 검증 후 누락 프레임 재생 + `RESUMED`(t="RESUMED" dispatch). 버퍼 밖 gap·토큰 불일치·만료는 INVALID_SESSION
-  → 재IDENTIFY + REST 재조회. RESUME은 버퍼가 노드 로컬이라 **동일 노드** 재연결에 한함(크로스노드 RESUME은 후속).
+  → 재IDENTIFY + REST 재조회.
+- **크로스노드 RESUME = 세션 마이그레이션 (v1.50, 구현됨)**: 재연결이 **원조가 아닌 노드 B**에 닿으면(로컬 Hub에 세션 없음 → 기존엔 INVALID_SESSION), B가 `ResumeFetch`를 **풀메시 broadcast**(원조만 세션을 가짐) → 원조 A가 `export_migration`(토큰·gap 검증 → 미수신 프레임을 JSON으로 직렬화 + **자기 세션 제거**) → `ResumeState{frames, last_seq, resume_token, user_id}`를 B에 회신 → B가 `import_migration`(세션 재생성, seq=원조 last_seq, **빈 버퍼**) + 받은 프레임을 클라에 재생 + `RESUMED` + **유저 realm 재구독**(`route_subscribe`로 구독자표 D12를 B로 이전 → 이후 이벤트가 B로 팬아웃). 요청/응답 조정은 Hub `pending` 맵(session_id→oneshot, server inbound가 `complete_migration`로 깨움) + 2s 타임아웃. 원조가 죽었으면(버퍼 휘발) 무응답 → 타임아웃 → INVALID_SESSION(=전체 재동기, 무손실). wire `ResumeFetch`(0x0203)/`ResumeState`(0x0204). **seam**: 멀티-세션 유저가 여러 노드에 흩어진 경우 재구독이 user→node를 단일 노드로 덮음(D12는 user당 단일 노드 가정) · 마이그레이션 중 in-flight 이벤트는 원조 세션 제거~B 재구독 사이 창에서 유실 가능(드묾, 다음 이벤트/READY로 복구).
 
 ### D25. 테스트 = 유닛 + DST + e2e
 - **결정론적 시뮬레이션(DST)**: 가상 시계 + 시뮬레이션 네트워크 + 시드 RNG로 클러스터를 단일 프로세스에서 재현 가능 실행, 카오스(지연/유실/파티션) 주입.
@@ -283,6 +286,8 @@
 
 ### D35. 읽기 캐싱 = Realm 액터 인메모리
 - Redis 없음 → **Realm 액터가 최근 N개 메시지 bounded 캐시**. 콜드 데이터는 Postgres 직격.
+- **채널별 last_message_id warmup 구현 (v1.47, D48 연결)**: 전체 메시지-content 캐시(읽기 서빙)는 읽기 경로 재라우팅이 필요한 큰 후속이라 미구현. 대신 그 **첫 조각 = 채널별 last_message_id**를 액터에 둔다 — Realm 액터가 `channel→last_message_id`를 보유(send 시 라이브 갱신), **콜드 액터(failover/Q7 D50 respawn)는 이벤트 로그 프로젝션으로 warmup**한다. 경로(P2 준수): node는 IO 무지라 storage를 모름 → **엣지(gateway)** 가 `Store::replay_events`→`RealmProjection`(D48, 채널별 last id를 fold)으로 산출해 `Router::warm_realm_last_ids`→액터 `WarmAndGet`(max-merge·멱등)로 주입하고 권위값을 회신받는다. **소비자**: gateway READY 스냅샷의 `last_message_ids`(채널별, Discord식 "최신으로 점프") — 로컬 소유 realm은 액터 권위값(warm+라이브), 원격 소유는 프로젝션 값 직접.
+  - **seam**: 최근 메시지 **content** 캐시(액터에서 히스토리 서빙)는 읽기 경로 재라우팅 필요 — 더 큰 후속(현재 읽기는 REST→PgStore 직격) · warmup이 realm마다 전체 재생(O(events)) — D48 스냅샷/컴팩션과 함께 최적화 · 원격 소유 realm은 액터 warmup 조회 없음(프로젝션 값으로 충분).
 
 ### D36. 프로토콜 버저닝 = 헤더 version 바이트
 - 수제 바이트 프레임 헤더에 **version 1바이트**. 롤링 재시작/DST 재현 시 포맷 진화 대비.
@@ -377,7 +382,9 @@
 - **남은 seam**: 완전 anti-entropy(주기적 merkle/digest 교환)는 아님 — join 시 1회 push(델타 + join-스냅샷이면 study 범위 충분). 유저가 많으면 스냅샷 배치 분할은 후속.
 
 ### D47. Voice 시그널링 = 제어 평면만 설계 (D21 경계 구체화, 미디어 제외)
-- **결정 (Phase 5, 설계 전용)**: 음성 **시그널링**(누가 어느 음성 채널에 있나·mute/deaf·미디어 서버 안내)을 **기존 Realm 라우팅으로 흡수**(P4)해 설계만 한다. **미디어 평면(WebRTC/SFU/Opus/SRTP/UDP)은 D21대로 제외** — 코드 미구현(사용자 결정: Voice=설계 문서만).
+- **결정 (Phase 5, 설계 → v1.48 제어 평면 구현)**: 음성 **시그널링**(누가 어느 음성 채널에 있나·mute/deaf·미디어 서버 안내)을 **기존 Realm 라우팅으로 흡수**(P4). **미디어 평면(WebRTC/SFU/Opus/SRTP/UDP)은 D21대로 영구 제외**.
+- **구현 (v1.48, fanout-only — 스펙 §3 "거의 코드 0")**: gateway op 4(`VOICE_STATE_UPDATE` C→S) → 권한 CONNECT(채널 컨텍스트, D17, `effective_channel_perms` 재사용) → **기존 emit 경로(`Router::route_emit`)로 `VOICE_STATE_UPDATE` 팬아웃**(멤버 이벤트와 동형 — 로컬/원격 `REALM_EMIT`/`REALM_FANOUT` 자동, **신규 와이어·신규 액터 상태 0**). 입장(`channel_id` 설정) 확정 시 그 세션에만 `VOICE_SERVER_UPDATE`(endpoint=**null** stub) 회신 — 미디어 경계 표식(D21). 퇴장=`channel_id:null`, 이동=다른 voice 채널 id(특수케이스 흡수 P4).
+- **명시적 비구현 (seam)**: ① voice state를 Realm 액터 맵에 보관(스펙 §1)·READY `voice_states` 스냅샷(§6) — 현재는 **fanout-only**(클라가 스트림으로 상태 재구성, 휘발 재선언 §1과 정합), 액터 상태화는 후속 증분. ② 서버 모더레이션(MUTE/DEAFEN/MOVE_MEMBERS, §5) → payload `server_mute/deaf`는 현재 항상 false. ③ 미디어 일체(D21 영구). 포트폴리오 서술 = "시그널링은 메시징과 동형이라 흡수, 미디어는 의도적 경계 밖".
 - **핵심 관찰**: voice state는 "Realm 안의 실시간 휘발 상태"라 **presence(D42)·구독자표(D12)와 동형**이다 → DB에 안 둠(DB-D5), Realm 액터가 `{user→VoiceState}` 맵 보유(구독자표 옆자리), 팬아웃은 **D39 범용 envelope `REALM_FANOUT`을 그대로 재사용**(`t="VOICE_STATE_UPDATE"`). 즉 시그널링은 텍스트 메시징 인프라에 **거의 코드 0으로 얹힌다**.
 - **경로**: gateway op 4(`VOICE_STATE_UPDATE` C→S) → 권한(CONNECT, D17) → 소유 노드 위임(예약 wire `VOICE_STATE_SET` 0x0120, `REALM_EMIT`과 대칭) → Realm 액터 맵 갱신 → `REALM_FANOUT`로 구독자에 `VOICE_STATE_UPDATE`. 입장 세션엔 `VOICE_SERVER_UPDATE` 회신하되 **endpoint=null stub**(미디어 서버 없음 = D21 경계 표식). 권한 CONNECT/SPEAK/MUTE·DEAFEN·MOVE_MEMBERS는 permissions.md 예약 비트의 소비처.
 - **명시적 비구현(이 결정의 핵심)**: 미디어 전송 일체. 포트폴리오 서술 = "시그널링은 메시징과 동형이라 흡수, 미디어는 의도적 경계 밖".
@@ -388,8 +395,12 @@
 - **순수 코어 (P2, DST 친화)**: `domain::event` — `RealmEventKind`(MessageCreated/Deleted·MemberJoined/Left, 안정 `code()`) + `RealmProjection`(이벤트 시퀀스를 **결정론적으로 fold** → members·message_count·last_message_id·last_seq). IO 없음 → "상태 = 이벤트의 함수" 불변식을 단위 테스트로 고정(재생 결정론·증분 재생=전체 재생·언더플로 없음). domain은 serde 무의존 유지 — 직렬화는 storage 어댑터가 (code + 타입화된 nullable bigint 슬롯)으로 소유.
 - **port (D22)**: `EventLogRepository`(append_event→per-realm 단조 seq, replay_events→증분 커서) → `Store` 슈퍼트레잇 합류. seq 부여 = `coalesce(max(seq),0)+1`인데 **단일 직렬 소비자**(dispatch 드라이버, D24)만 append하므로 경합 없음(nonce 멱등 D34와 동일한 앱레벨 직렬화 논리).
 - **생산자 (가산 배선)**: dispatch 드라이버가 persist(D24) 직후 `MessageCreated`를 append(messages 진실 + 로그 사실 둘 다 단일 소비자가 순서대로 기록). append 실패는 warn 후 계속(배달 안 막음 — messages가 진실, 로그는 보조). **라이브 검증**(cli scenario → `realm_events`에 MessageCreated 1건, message_id 일치).
+- **멤버/삭제 생산자 (E2, v1.46 — dispatch 단일 소비자로 위임)**: 멤버 입퇴장(`MemberJoined`/`MemberLeft`)·메시지 삭제(`MessageDeleted`) 사실도 로그에 기록한다. **핵심 제약**: seq 무경합은 *단일 직렬 소비자(소유 노드 dispatch)만 append*에서 나오므로(D24), rest-api 핸들러가 **직접 append하지 않는다**. 대신 `RealmEmitter::emit`에 **타입 사실(`Option<RealmEventKind>`)을 동반**시켜 emit 경로로 흘리고, 소유 노드의 dispatch가 `Broadcast` 처리 시 append한다 — MessageCreated와 같은 단일 소비자 지점.
+  - **크로스노드 (B 정석)**: realm 소유 노드가 다른 노드면 emit이 `REALM_EMIT` 와이어로 위임되는데, 사실을 **primitive 슬롯(`EventFact`: code+message_id+channel_id+user_id)** 으로 실어 보낸다(protocol은 domain 무의존 P2 — `node`가 `RealmEventKind`↔`EventFact` 변환 소유). 소유 노드가 복원해 자기 dispatch에서 append → 단일 소비자 불변식 유지. (payload-파싱 대안은 D48 "타입 사실=JSON과 별개" 정신 위배라 기각.)
+  - **배선 지점**: invite redeem→MemberJoined · member kick/leave→MemberLeft · 그룹DM recipient add/remove→MemberJoined/Left(같은 Realm 멤버 입퇴장) · message delete→MessageDeleted. 나머지 emit(닉변경·리액션·스레드 등)은 사실 아님→`None`. **웹훅 MESSAGE_CREATE는 액터 우회라 미기록**(seam 유지).
+- **무결성 (E1 — 수용된 결정, v1.46)**: append를 persist와 **같은 트랜잭션에 묶지 않는다**(eventual). messages/members(엔티티 진실)는 REST 트랜잭션/액터 persist가 기록하고, 로그는 **보조 사실 스트림**이라 append 실패는 warn 후 계속. study 범위에서 "진실=테이블, 로그=보조"로 방어 가능 — 완전 원자성(outbox/한 트랜잭션)은 의도적 후속.
 - **rehydrate 연결(D23/D35)**: `replay_events`→`RealmProjection`가 Realm 파생 상태(특히 last_message_id)를 재구성 → **D35 최근메시지 캐시 warmup**의 입력이 될 자리(후속 배선 지점).
-- **남은 seam**: append가 persist와 같은 트랜잭션이 아님(완전 무결성은 후속) · 멤버/삭제 이벤트 생산자는 dispatch 외(rest-api) 경로라 후속 배선 · 스냅샷/컴팩션 없음(전체 재생) · 메시지 핫패스 2차 쓰기(write amplification — 배치/비동기 append가 운영 최적화). 비파괴라 messages 경로는 그대로.
+- **남은 seam**: append가 persist와 같은 트랜잭션이 아님(E1, 수용) · 웹훅 MESSAGE_CREATE 미기록 · 스냅샷/컴팩션 없음(전체 재생) · 메시지 핫패스 2차 쓰기(write amplification — 배치/비동기 append가 운영 최적화). 비파괴라 messages 경로는 그대로.
 - 코어: `domain::event`(순수) · 포트 `EventLogRepository` · `storage` V20 `realm_events`.
 
 ### D49. CRDT 오프라인 동기화 = 상태 기반 CRDT(CvRDT) + LWW 유저 문서
@@ -399,6 +410,14 @@
 - **동기화 프로토콜 (상태 기반)**: REST `GET/POST /users/@me/sync`. 기기가 로컬 상태(엔트리들)를 POST → 서버가 LWW 병합 → 병합 문서 회신(기기는 응답을 자기 복제본과 다시 병합). 상태 기반이라 델타 추적 불필요 — 어느 순서로 push해도 수렴. **라이브 검증**(phone@200 → laptop@210 채택 → 이른 phone 재push 무시 → GET 수렴, 툼스톤 삭제).
 - **경계/seam**: 현재 LWW-Map 1종만 wire(OrSet/PnCounter는 툴킷에 있으나 미배선 — 리액션/카운터 적용은 후속) · 동기화는 REST 폴링(WS push/실시간 anti-entropy 아님) · 메시지 본문은 CRDT 아님(append-only + 서버 id가 더 단순, D24) · 멀티노드 간 user_crdt_entries 수렴은 DB 공유로 자연(노드 무관 무상태 REST).
 - 코어: `domain::crdt`(순수 툴킷) · 포트 `CrdtRepository` · `storage` V21 `user_crdt_entries` · rest-api `/users/@me/sync`.
+
+### D50. 액터 supervisor = let-it-crash + Router lazy 재시작 (Q7 해소, D23 구체화)
+- **문제 (Q7, 유일한 미결정)**: `actor-rt::spawn`은 `while let Some(msg) = rx.recv().await { actor.handle(msg).await }` 루프뿐 — `handle`이 **패닉**하면 그 tokio task가 종료하고 메일박스가 닫힌다. 그런데 `Router::local_realm`이 메일박스를 `HashMap`에 캐시(`entry().or_insert_with`)하므로, **죽은 메일박스가 그대로 남아** 그 Realm이 프로세스 재시작 전까지 영구 사망(이후 send는 전부 `Closed`)했다. supervisor 전략이 비어 있던 자리.
+- **결정 (Phase 5 하드닝)**: **let-it-crash + Router lazy 재시작**. Erlang식 — 액터가 패닉하면 죽게 두고, 상위 supervisor(여기선 `Router`)가 다음 접근 때 닫힌 메일박스를 감지해 **fresh 액터로 재spawn**한다. 이것이 곧 D23 rehydrate: 액터 상태는 재구축 가능한 휘발 캐시(구독자표뿐, D12/DB-D5)이고 **메시지 진실은 Postgres**(persist-then-fanout, D24)라 fresh-spawn으로 충분(클라는 자동 재구독 D13).
+  - **actor-rt (계약만)**: `spawn` doc에 let-it-crash 계약 명문화 — 패닉=task 종료=메일박스 닫힘, 자동 재시작 안 함(상위 책임). 패닉 출력은 tokio 기본 패닉 훅. 런타임은 범용·미니멀 유지(새 의존성 0). 계약 단위 테스트(`panicking_handler_closes_mailbox`).
+  - **node Router (supervisor)**: `local_realm`이 캐시된 메일박스 `is_active()`를 검사 → 닫혔으면 항목 제거 후 `or_insert_with`가 fresh 재spawn. 3줄 변경, 락 안에서 원자적.
+- **명시적 비선택**: per-message `catch_unwind`로 액터를 살려 두는 방식(나쁜 메시지만 스킵)은 `&mut self` 중간 패닉 시 포이즌 상태 리스크라 기각. proactive supervisor task(JoinHandle 감시)도 study 범위엔 과잉이라 미채택(확장 최소화).
+- **남은 seam**: 재시작 폭주 제한(restart intensity)·backoff 없음(study 범위 충분, 패닉이 결정론적이면 재진입 가능 — 후속). 크로스노드 RESUME과 함께 장애 복구 그림 완성.
 
 ---
 
@@ -424,7 +443,8 @@
 - **Phase 2 — 분산 활성화**: raw TCP + mTLS 전송 구현체로 stub 교체, 멀티노드, Consistent Hashing, Realm 2단 라우팅, 팬아웃.
 - **Phase 3 — Discord 본체**: 역할/권한 비트마스크, DM/그룹DM, 멤버, 초대, 리액션, 편집/삭제, 멘션/답장, presence(gossip).
 - **Phase 4 — 살붙이기**: 스레드, 포럼, 웹훅, 감사로그, 검색, 파일첨부, TOTP, PoW 봇방지, rate limit.
-- **Phase 5 — 스트레치**: gossip discovery(SWIM, D45) + presence anti-entropy(D46), Passkeys(D19), **이벤트 소싱(D48)**, **CRDT 오프라인 동기화(D49)**, Voice 시그널링 설계(D47). *(MinIO 첨부 = 범위 제외 — 로컬 테스트 전용·확장 의사 없음, LocalFsBlobStore로 충분. BlobStore 포트는 유지. D37.)*
+- **Phase 5 — 스트레치 (✅ 완료, v1.50)**: gossip discovery(SWIM, D45) + presence anti-entropy(D46), Passkeys(D19, usernameless 포함), **이벤트 소싱(D48, 멤버/삭제 생산자 포함)**, **CRDT 오프라인 동기화(D49)**, **Voice 제어 평면(D47, 미디어 제외 D21)**, **액터 supervisor(Q7/D50)**, **D35 last_message_id warmup**, **크로스노드 RESUME=세션 마이그레이션(D24)**. *(MinIO 첨부 = 범위 제외 — LocalFsBlobStore로 충분, BlobStore 포트는 유지. D37.)*
+- **Phase 6 — frontend (D30)**: React + TS + Vite. R4 순서상 backend·API·CLI 완료 후 최후순위 — 이제 착수 가능.
 
 ---
 
@@ -440,7 +460,7 @@
 - [x] ~~**Q3 외 DB**~~ → D28.
 
 ### 남은 자잘한 디테일 (Phase 진입 시 결정)
-- [ ] **Q7. 액터 supervisor/재시작 전략** (D23이 큰 틀, 세부는 Phase 2).
+- [x] ~~**Q7. 액터 supervisor/재시작 전략**~~ → **D50으로 해결** (Phase 5): let-it-crash + Router lazy 재시작(닫힌 메일박스 감지→fresh 재spawn=D23 rehydrate). actor-rt는 계약만(미니멀 유지), supervisor는 Router.
 - [x] ~~**Q9. CLI 시나리오 스크립트 포맷**~~ → 해결: CLI `scenario` 서브커맨드(헤드리스 종단 자동 검증 — 가입→길드→WS구독→전송→MESSAGE_CREATE 수신, PASS/FAIL+exit code). 별도 스크립트 DSL 없이 코드 시나리오로 시작, 필요 시 후속 확장.
 - [x] ~~**Q10. 검색 구현**~~ → 해결 (Phase 4, v1.33): **Postgres FTS**. `messages.content_tsv`(tsvector STORED 생성 컬럼, config=`simple`) + GIN 인덱스(`ix_messages_fts`, 04 §5). 쿼리는 `websearch_to_tsquery`(안전 파싱). REST `GET /guilds/:id/messages/search` — 길드 단위 검색이되 결과는 **VIEW_CHANNEL 있는 채널로 한정**(채널 오버라이드 존중, D17). 외부 검색엔진(Elasticsearch) 회피 = 로컬 study 범위 적합. seam: author/before/after 필터·ts_rank 랭킹은 후속.
 - [x] ~~**Q11. gossip discovery + 전역 presence**~~ — 전역 presence=**D42**, 크로스노드 유저 라우팅=**D43**, **gossip discovery(SWIM 동적 합류/장애감지)=D45**, **presence anti-entropy=D46**(Phase 5) 으로 모두 해결.

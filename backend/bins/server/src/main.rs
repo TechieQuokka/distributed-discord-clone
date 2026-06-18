@@ -294,6 +294,43 @@ async fn run_inbound(
             M::UserDeliver { t, payload, user_ids } => {
                 gateway::deliver_user(&hub, t, payload, &user_ids).await;
             }
+            // 크로스노드 RESUME(D24): 원조 노드측 — 세션 export(검증+제거) → 요청 노드에 ResumeState 회신.
+            M::ResumeFetch { session_id, token, last_seq, requester } => {
+                match hub.export_migration(session_id, &token, last_seq) {
+                    gateway::MigrationExport::NotHere => {} // 다른 노드가 원조 — 무응답.
+                    gateway::MigrationExport::Reject => {
+                        router
+                            .send_to(requester, M::ResumeState {
+                                session_id,
+                                found: false,
+                                user_id: 0,
+                                last_seq: 0,
+                                resume_token: String::new(),
+                                frames: Vec::new(),
+                            })
+                            .await;
+                    }
+                    gateway::MigrationExport::Ok { user_id, last_seq, resume_token, frames } => {
+                        router
+                            .send_to(requester, M::ResumeState {
+                                session_id,
+                                found: true,
+                                user_id,
+                                last_seq,
+                                resume_token,
+                                frames,
+                            })
+                            .await;
+                    }
+                }
+            }
+            // 크로스노드 RESUME(D24): 요청 노드측 — 원조 응답을 대기 중 핸들러에 전달.
+            M::ResumeState { session_id, found, user_id, last_seq, resume_token, frames } => {
+                hub.complete_migration(
+                    session_id,
+                    gateway::MigratedSession { found, user_id, last_seq, resume_token, frames },
+                );
+            }
             // SWIM 멤버십(D45): 상태머신에 합병 → 부수효과(송신/링 변형/dial)를 실행.
             m @ (M::SwimJoin { .. }
             | M::SwimPing { .. }

@@ -126,10 +126,24 @@ async fn can_send<S: Store>(
     realm: domain::id::RealmId,
     user: UserId,
 ) -> Result<bool, (StatusCode, &'static str)> {
+    use domain::permissions::Permissions;
+    Ok(effective_channel_perms(store, channel_id, realm, user)
+        .await?
+        .is_some_and(|p| p.contains(Permissions::SEND_MESSAGES)))
+}
+
+/// 멤버이면 **채널 컨텍스트**(오버라이드 적용)의 effective 권한을, 비멤버면 None을 반환 (D17). 계산은 domain.
+/// `can_send`(SEND_MESSAGES)·Voice op4(CONNECT, D47) 등 채널 권한 게이트가 공유.
+pub(crate) async fn effective_channel_perms<S: Store>(
+    store: &S,
+    channel_id: domain::id::ChannelId,
+    realm: domain::id::RealmId,
+    user: UserId,
+) -> Result<Option<domain::permissions::Permissions>, (StatusCode, &'static str)> {
     use domain::permissions::{Permissions, effective_channel_permissions};
     let db = |_| (StatusCode::INTERNAL_SERVER_ERROR, "db error");
     if !store.is_member(realm, user).await.map_err(db)? {
-        return Ok(false);
+        return Ok(None);
     }
     let is_owner = store.get_guild(realm).await.map_err(db)?.map(|g| g.owner_id == user).unwrap_or(false);
     let everyone = store
@@ -146,15 +160,14 @@ async fn can_send<S: Store>(
         .map(|(id, bits)| (id, Permissions::from_bits_truncate(bits)))
         .collect();
     let overwrites = store.list_overwrites(channel_id).await.map_err(db)?;
-    let perms = effective_channel_permissions(
+    Ok(Some(effective_channel_permissions(
         is_owner,
         realm.0.raw(),
         user.0.raw(),
         everyone,
         &member_roles,
         &overwrites,
-    );
-    Ok(perms.contains(Permissions::SEND_MESSAGES))
+    )))
 }
 
 // --- 인증 추출기 (gateway 로컬: rest-api와 독립) ---

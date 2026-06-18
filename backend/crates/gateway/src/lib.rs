@@ -19,7 +19,7 @@ pub mod state;
 pub mod user_route;
 
 pub use dispatch::{deliver_local, run_dispatch};
-pub use hub::{Hub, ResumeOutcome};
+pub use hub::{Hub, MigratedSession, MigrationExport, ResumeOutcome};
 pub use routes::router;
 pub use state::GatewayState;
 pub use user_route::{UserRouter, deliver_user};

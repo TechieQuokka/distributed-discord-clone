@@ -31,6 +31,9 @@ pub mod msg_type {
     pub const UNSUBSCRIBE: u16 = 0x0111;
     pub const PRESENCE_GOSSIP: u16 = 0x0201;
     pub const USER_DELIVER: u16 = 0x0202;
+    // 크로스노드 RESUME = 세션 마이그레이션 (D24 후속). 원조 노드에서 버퍼+메타 핸드오프.
+    pub const RESUME_FETCH: u16 = 0x0203;
+    pub const RESUME_STATE: u16 = 0x0204;
     // SWIM 멤버십 (D45, node-wire §4-5).
     pub const SWIM_JOIN: u16 = 0x0301;
     pub const SWIM_PING: u16 = 0x0302;
@@ -59,6 +62,30 @@ impl SwimMember {
     }
     fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         Ok(Self { node_id: r.u64()?, addr: r.string()?, incarnation: r.u64()?, state: r.u8()? })
+    }
+}
+
+/// 이벤트 소싱 사실(D48)을 `RealmEmit`에 실어 소유 노드 dispatch가 append하게 하는 와이어 표현 (E2).
+/// protocol은 domain 무의존(P2)이라 **primitive 슬롯**으로 — storage 인코딩과 동형(code + id 슬롯).
+/// 미사용 슬롯은 0. code→어떤 슬롯이 유효한지의 해석은 `node`가 `domain::event`로 변환할 때 수행.
+/// code: 1=MessageCreated 2=MessageDeleted 3=MemberJoined 4=MemberLeft (domain `RealmEventKind::code()`와 일치).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventFact {
+    pub code: u8,
+    pub message_id: u64,
+    pub channel_id: u64,
+    pub user_id: u64,
+}
+
+impl EventFact {
+    fn encode(&self, w: &mut Writer) {
+        w.u8(self.code);
+        w.u64(self.message_id);
+        w.u64(self.channel_id);
+        w.u64(self.user_id);
+    }
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(Self { code: r.u8()?, message_id: r.u64()?, channel_id: r.u64()?, user_id: r.u64()? })
     }
 }
 
@@ -104,10 +131,12 @@ pub enum NodeMessage {
         user_ids: Vec<u64>,
     },
     /// 비소유 노드 → 소유 노드: 비-메시지 이벤트 팬아웃 위임 (범용 envelope, D39).
+    /// `fact` = 이벤트 소싱 사실(D48/E2) — 소유 노드 dispatch가 append_event. 없으면 팬아웃만.
     RealmEmit {
         realm_id: u64,
         t: String,
         payload: String,
+        fact: Option<EventFact>,
     },
     Subscribe { realm_id: u64, user_id: u64, node_id: u64 },
     Unsubscribe { realm_id: u64, user_id: u64, node_id: u64 },
@@ -118,6 +147,19 @@ pub enum NodeMessage {
     /// 대상 유저를 호스팅하는 노드에만 전송(broadcast 아님). 수신 노드가 로컬 세션에 배달.
     /// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON(불투명), `user_ids`=이 노드의 로컬 대상.
     UserDeliver { t: String, payload: String, user_ids: Vec<u64> },
+    /// 크로스노드 RESUME (D24 세션 마이그레이션): 재연결이 닿은 노드 → (broadcast) 원조 노드에 세션 요청.
+    /// `requester`=요청 노드(응답 회신 대상). 원조만 세션을 가지고 응답한다.
+    ResumeFetch { session_id: u64, token: String, last_seq: u64, requester: u64 },
+    /// 원조 노드 → 요청 노드: 세션 상태 핸드오프. `found`=세션+토큰 일치 여부. `frames`=미수신 프레임
+    /// (직렬화된 JSON 문자열, last_seq 이후). 원조는 응답과 함께 자기 세션을 제거(마이그레이션).
+    ResumeState {
+        session_id: u64,
+        found: bool,
+        user_id: u64,
+        last_seq: u64,
+        resume_token: String,
+        frames: Vec<String>,
+    },
     /// 신규 노드 → seed(introducer): 합류 요청 (D45). node_id는 헤더 src_node_id.
     SwimJoin { addr: String, incarnation: u64 },
     /// SWIM 주기 탐침 (D45). `updates`=피기백 멤버 델타(감염형 전파).
@@ -144,6 +186,8 @@ impl NodeMessage {
             NodeMessage::Unsubscribe { .. } => msg_type::UNSUBSCRIBE,
             NodeMessage::PresenceGossip { .. } => msg_type::PRESENCE_GOSSIP,
             NodeMessage::UserDeliver { .. } => msg_type::USER_DELIVER,
+            NodeMessage::ResumeFetch { .. } => msg_type::RESUME_FETCH,
+            NodeMessage::ResumeState { .. } => msg_type::RESUME_STATE,
             NodeMessage::SwimJoin { .. } => msg_type::SWIM_JOIN,
             NodeMessage::SwimPing { .. } => msg_type::SWIM_PING,
             NodeMessage::SwimAck { .. } => msg_type::SWIM_ACK,
@@ -183,10 +227,17 @@ impl NodeMessage {
                     w.u64(*u);
                 }
             }
-            NodeMessage::RealmEmit { realm_id, t, payload } => {
+            NodeMessage::RealmEmit { realm_id, t, payload, fact } => {
                 w.u64(*realm_id);
                 w.string(t);
                 w.string(payload);
+                match fact {
+                    Some(f) => {
+                        w.bool(true);
+                        f.encode(w);
+                    }
+                    None => w.bool(false),
+                }
             }
             NodeMessage::Subscribe { realm_id, user_id, node_id }
             | NodeMessage::Unsubscribe { realm_id, user_id, node_id } => {
@@ -205,6 +256,23 @@ impl NodeMessage {
                 w.u32(user_ids.len() as u32);
                 for u in user_ids {
                     w.u64(*u);
+                }
+            }
+            NodeMessage::ResumeFetch { session_id, token, last_seq, requester } => {
+                w.u64(*session_id);
+                w.string(token);
+                w.u64(*last_seq);
+                w.u64(*requester);
+            }
+            NodeMessage::ResumeState { session_id, found, user_id, last_seq, resume_token, frames } => {
+                w.u64(*session_id);
+                w.bool(*found);
+                w.u64(*user_id);
+                w.u64(*last_seq);
+                w.string(resume_token);
+                w.u32(frames.len() as u32);
+                for f in frames {
+                    w.string(f);
                 }
             }
             NodeMessage::SwimJoin { addr, incarnation } => {
@@ -257,7 +325,8 @@ impl NodeMessage {
                 let realm_id = r.u64()?;
                 let t = r.string()?;
                 let payload = r.string()?;
-                NodeMessage::RealmEmit { realm_id, t, payload }
+                let fact = if r.bool()? { Some(EventFact::decode(r)?) } else { None };
+                NodeMessage::RealmEmit { realm_id, t, payload, fact }
             }
             msg_type::SUBSCRIBE => NodeMessage::Subscribe {
                 realm_id: r.u64()?,
@@ -283,6 +352,25 @@ impl NodeMessage {
                     user_ids.push(r.u64()?);
                 }
                 NodeMessage::UserDeliver { t, payload, user_ids }
+            }
+            msg_type::RESUME_FETCH => NodeMessage::ResumeFetch {
+                session_id: r.u64()?,
+                token: r.string()?,
+                last_seq: r.u64()?,
+                requester: r.u64()?,
+            },
+            msg_type::RESUME_STATE => {
+                let session_id = r.u64()?;
+                let found = r.bool()?;
+                let user_id = r.u64()?;
+                let last_seq = r.u64()?;
+                let resume_token = r.string()?;
+                let n = r.u32()? as usize;
+                let mut frames = Vec::with_capacity(n);
+                for _ in 0..n {
+                    frames.push(r.string()?);
+                }
+                NodeMessage::ResumeState { session_id, found, user_id, last_seq, resume_token, frames }
             }
             msg_type::SWIM_JOIN => {
                 NodeMessage::SwimJoin { addr: r.string()?, incarnation: r.u64()? }
@@ -373,10 +461,53 @@ mod tests {
 
     #[test]
     fn realm_emit_round_trip() {
+        // fact=None (팬아웃만).
+        let msg = NodeMessage::RealmEmit {
+            realm_id: 0x100,
+            t: "GUILD_MEMBER_UPDATE".into(),
+            payload: r#"{"realm_id":"256","user":{"id":"10"}}"#.into(),
+            fact: None,
+        };
+        let framed = msg.encode(3, 0x55);
+        let (payload, _) = read_frame(&framed).unwrap().unwrap();
+        let (_, decoded) = NodeMessage::decode(payload).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn resume_migration_round_trip() {
+        // 크로스노드 RESUME 세션 마이그레이션 와이어 (D24).
+        let fetch = NodeMessage::ResumeFetch {
+            session_id: 0xDEAD,
+            token: "tok-abc".into(),
+            last_seq: 42,
+            requester: 7,
+        };
+        let framed = fetch.encode(2, 0x11);
+        let (p, _) = read_frame(&framed).unwrap().unwrap();
+        assert_eq!(NodeMessage::decode(p).unwrap().1, fetch);
+
+        let state = NodeMessage::ResumeState {
+            session_id: 0xDEAD,
+            found: true,
+            user_id: 99,
+            last_seq: 45,
+            resume_token: "tok-abc".into(),
+            frames: vec![r#"{"op":0,"t":"X","s":43}"#.into(), r#"{"op":0,"t":"Y","s":44}"#.into()],
+        };
+        let framed = state.encode(2, 0x22);
+        let (p, _) = read_frame(&framed).unwrap().unwrap();
+        assert_eq!(NodeMessage::decode(p).unwrap().1, state);
+    }
+
+    #[test]
+    fn realm_emit_with_fact_round_trip() {
+        // fact=Some (이벤트 소싱 사실 동반, E2). MemberLeft(code 4)로 라운드트립.
         let msg = NodeMessage::RealmEmit {
             realm_id: 0x100,
             t: "GUILD_MEMBER_REMOVE".into(),
             payload: r#"{"realm_id":"256","user":{"id":"10"}}"#.into(),
+            fact: Some(EventFact { code: 4, message_id: 0, channel_id: 0, user_id: 10 }),
         };
         let framed = msg.encode(3, 0x55);
         let (payload, _) = read_frame(&framed).unwrap().unwrap();

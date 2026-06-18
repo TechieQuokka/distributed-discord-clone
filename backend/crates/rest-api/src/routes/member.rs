@@ -119,7 +119,7 @@ async fn patch_member<S: Store + 'static>(
     let member = st.store.get_member(realm, target).await?.ok_or(ApiError::NotFound)?;
     if let Some(u) = st.store.find_by_id(target).await? {
         let payload = member_upsert_payload(realm, &u, Some(&member));
-        let _ = st.emitter.emit(realm, "GUILD_MEMBER_UPDATE".into(), payload).await;
+        let _ = st.emitter.emit(realm, "GUILD_MEMBER_UPDATE".into(), payload, None).await;
     }
     crate::routes::audit::record(
         &st, realm, actor, domain::audit::AuditAction::MemberNickUpdate, Some(target.0.raw()),
@@ -156,7 +156,9 @@ async fn remove_member<S: Store + 'static>(
         return Err(ApiError::NotFound);
     }
     let payload = member_remove_payload(realm, target);
-    let _ = st.emitter.emit(realm, "GUILD_MEMBER_REMOVE".into(), payload).await;
+    // 이벤트 소싱 사실(D48/E2): 멤버 이탈 → MemberLeft. dispatch 단일 소비자가 append.
+    let fact = domain::event::RealmEventKind::MemberLeft { user: target };
+    let _ = st.emitter.emit(realm, "GUILD_MEMBER_REMOVE".into(), payload, Some(fact)).await;
     // 추방(타인)만 감사 기록 — 본인 탈퇴는 제외.
     if target != actor {
         crate::routes::audit::record(

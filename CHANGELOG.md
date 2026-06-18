@@ -5,6 +5,90 @@
 
 ---
 
+## [1.50.0] - 2026-06-18
+### 새 기능 — 크로스노드 RESUME = 세션 마이그레이션 (D24)
+- **재연결이 다른 노드에 닿아도 RESUME** — 기존엔 재생 버퍼가 노드 로컬(Hub)이라 원조가 아닌 노드에 재연결하면 INVALID_SESSION(전체 재동기)였다. 이제 그 노드가 원조에서 세션을 **핸드오프**받아 재개.
+- **흐름**: 재연결 노드 B가 `ResumeFetch`를 풀메시 broadcast(원조만 세션 보유) → 원조 A가 `export_migration`(토큰·gap 검증 → 미수신 프레임 직렬화 + **자기 세션 제거**) → `ResumeState` 회신 → B가 `import_migration`(세션 재생성 seq=원조값, 빈 버퍼) + 프레임 재생 + RESUMED + **유저 realm 재구독**(구독자표 D12를 B로 이전 → 이후 이벤트가 B로 팬아웃). 조정 = Hub `pending` 맵(oneshot) + 2s 타임아웃. 원조 사망 시 무응답→타임아웃→INVALID_SESSION(무손실).
+- crate 변경:
+  - `protocol`: `ResumeFetch`(0x0203)/`ResumeState`(0x0204) 와이어 + 라운드트립 테스트(14→15). (1.6→1.7)
+  - `gateway`: Hub `export_migration`/`import_migration`/`begin`·`complete`·`cancel_migration` + pending 맵 + run_resume 마이그레이션 분기 + 라운드트립 테스트(9→10). (1.15→1.16)
+  - `node`: router handle_inbound에 Resume* → Ok(None)(server가 처리). (1.10→1.10.1)
+  - `server`: run_inbound가 ResumeFetch(export→회신)·ResumeState(complete) 처리. (1.9→1.10)
+- 문서: `decisions.md` D24(크로스노드 RESUME), `node-wire.md` 0x0203/0x0204, TODO.
+- seam: 멀티-세션 유저가 여러 노드에 흩어지면 재구독이 user→node를 단일 노드로 덮음(D12 가정) · 마이그레이션 창(원조 제거~B 재구독) in-flight 이벤트 드물게 유실(다음 이벤트/READY 복구).
+
+---
+
+## [1.49.0] - 2026-06-18
+### 새 기능 — WebAuthn usernameless(discoverable) 로그인 (D19)
+- **username 없는 passkey 로그인** — 인증기가 resident key로 유저를 고르고, 서버는 자격증명의 user handle(Uuid)에서 유저를 식별(`uuid_to_snowflake`). 기존 로그인은 username으로 passkey를 로드했지만, discoverable은 그 단계가 없다.
+- **흐름**: `POST /auth/webauthn/login/discoverable/start`(본문 없음 → challenge + `Ceremony::Discoverable`) → 클라가 resident 자격증명으로 서명 → `/finish`(자격증명 → user 식별 → 그 유저 passkey로 검증 → access+refresh).
+- **P6 유지**: 크립토는 webauthn-rs(`conditional-ui` feature의 discoverable API) — `start/identify/finish_discoverable_authentication` 위임. 직접 짠 것 없음.
+- crate 변경:
+  - `auth`: `WebauthnService`에 discoverable 3메서드 + `uuid_to_snowflake` + `conditional-ui` feature. 헤드리스 검증 테스트(challenge 발급 + handle↔Snowflake 왕복, 19→20). (1.3→1.4)
+  - `rest-api`: `Ceremony::Discoverable` 변형 + `/auth/webauthn/login/discoverable/{start,finish}` 라우트. (1.20→1.21)
+- 문서: `decisions.md` D19(usernameless), `api/rest.md` discoverable 엔드포인트.
+- seam: 전체 서명 라운드트립은 resident-key 탐색 필요 → SoftPasskey(헤드리스) 미지원, 실제 인증기 영역 · 멀티노드 ceremony 공유(start/finish 같은 노드)는 후속.
+
+---
+
+## [1.48.0] - 2026-06-18
+### 새 기능 — Voice 시그널링 제어 평면 (D47, 미디어 제외 D21)
+- **음성 시그널링 제어 평면 구현** (이전 "설계 문서만"에서 전환) — gateway op 4(`VOICE_STATE_UPDATE` C→S): 입장/이동/퇴장 + self mute/deaf → 권한 CONNECT(채널 컨텍스트) → 같은 Realm 구독자에 `VOICE_STATE_UPDATE` 팬아웃. 입장 시 `VOICE_SERVER_UPDATE`(endpoint=**null** stub)를 그 세션에만 회신 — 미디어 서버 경계(D21) 표식.
+- **"거의 코드 0" (스펙 §3)**: 팬아웃은 멤버 이벤트와 같은 **기존 emit 경로(`Router::route_emit`)를 그대로 재사용** — 로컬/원격(`REALM_EMIT`/`REALM_FANOUT`) 자동 처리, **신규 와이어·신규 액터 상태 0**. 음성 상태가 텍스트 메시징과 동형(Realm 라우팅+구독자표+범용 envelope)임을 실증.
+- **미디어 평면은 D21대로 영구 제외**: WebRTC/SFU/Opus/SRTP/UDP 일체. `VOICE_SERVER_UPDATE.endpoint=null`이 그 경계 표식.
+- crate 변경:
+  - `gateway`: protocol op 4 상수 + `handle_voice_state`(session, 권한+팬아웃+VOICE_SERVER_UPDATE) + `effective_channel_perms` 헬퍼(can_send 일반화, CONNECT 공유) + pump에 session_id. (1.14→1.15)
+- 문서: `decisions.md` D47(구현), `voice-signaling.md`(상태+§8 체크리스트), `api/gateway.md`(op 4 + VOICE dispatch).
+- seam(스펙 §1/§5/§6): 액터 voice_states 맵·READY voice_states 스냅샷·서버 모더레이션(MUTE/DEAFEN/MOVE_MEMBERS, server_mute/deaf 항상 false) — 현재 fanout-only(클라가 스트림으로 상태 재구성). 액터 상태화는 후속 증분.
+
+---
+
+## [1.47.0] - 2026-06-18
+### 새 기능 — D35 채널별 last_message_id warmup (D48 연결)
+- **콜드 Realm 액터를 이벤트 로그 프로젝션으로 warmup** — failover/Q7 respawn으로 빈 액터가 떠도 채널별 last_message_id를 이벤트 로그(`replay_events`→`RealmProjection`)로 복원. "상태=이벤트의 함수"(D48) rehydrate의 실사용 쇼케이스.
+- **경로(P2 준수)**: node는 IO 무지라 storage를 모름 → 엣지(gateway)가 프로젝션을 산출해 `Router::warm_realm_last_ids`→액터 `WarmAndGet`(max-merge·멱등)로 주입. 액터는 send 시 라이브 갱신 + warmup으로 콜드 복원.
+- **소비자**: gateway READY 스냅샷 `last_message_ids`(채널별, Discord식 "최신으로 점프") — 로컬 소유 realm은 액터 권위값, 원격 소유는 프로젝션 값 직접. (소비자 없는 dead code를 피하려 content 캐시 전체가 아닌 last_message_id부터.)
+- **프로젝션 확장**: `RealmProjection`에 `last_message_by_channel`(채널별 max) 추가 — 순수 fold, 결정론 단위 테스트.
+- crate 변경:
+  - `domain`: `RealmProjection.last_message_by_channel` + fold + 테스트. (1.19→1.20)
+  - `node`: `RealmActor`가 `last_by_channel` 보유(send 갱신) + `WarmAndGet` 명령 + `Router::warm_realm_last_ids` + 테스트(1→). (1.9→1.10)
+  - `gateway`: READY가 `channel_last_ids`로 콜드 액터 warmup + `last_message_ids` 필드. (1.13→1.14)
+- 문서: `decisions.md` D35(warmup 구현)+D48 연결, `api/gateway.md` READY `last_message_ids`, TODO.
+- seam: 메시지 **content** 캐시(액터 히스토리 서빙)는 읽기 경로 재라우팅 필요한 후속 · warmup이 realm마다 전체 재생(O(events)) — D48 스냅샷/컴팩션과 함께 최적화 · 원격 realm 액터 warmup 조회 없음.
+
+---
+
+## [1.46.0] - 2026-06-18
+### 새 기능 — 이벤트 소싱 멤버/삭제 생산자 (E2, D48 후속)
+- **멤버 입퇴장·메시지 삭제 사실을 이벤트 로그에 기록** — 기존엔 `MessageCreated`만 append됐고 `MemberJoined/Left`·`MessageDeleted`는 enum에만 있고 생산자가 없었다(D48 seam). 이제 `realm_events` 로그가 멤버십·삭제까지 포착 → `RealmProjection`의 members 집합·message_count가 정확.
+- **단일 소비자 위임 (E2)**: seq 무경합은 *소유 노드 dispatch만 append*(D24)에서 나오므로 rest-api 핸들러가 직접 append하지 않는다. `RealmEmitter::emit`에 **타입 사실(`Option<RealmEventKind>`)을 동반**시켜 emit 경로로 흘리고, 소유 노드 dispatch가 `Broadcast` 처리 시 append.
+- **크로스노드 (B 정석)**: 원격 소유 realm은 `REALM_EMIT` 와이어에 사실을 **primitive 슬롯(`EventFact`)** 으로 실어 위임 → 소유 노드가 복원해 자기 dispatch에서 append(protocol은 domain 무의존 P2 — `node`가 변환 소유). payload-파싱 대안은 D48 정신 위배라 기각.
+- **무결성 (E1, 수용)**: append는 persist와 별개(eventual) — 진실은 members/messages 테이블, 로그는 보조라 append 실패는 warn 후 계속. 완전 원자성은 의도적 후속.
+- 배선: invite redeem→MemberJoined · kick/leave→MemberLeft · 그룹DM recipient±→MemberJoined/Left · message delete→MessageDeleted. 닉변경·리액션·스레드 등은 None. 웹훅 MESSAGE_CREATE는 액터 우회라 미기록(seam).
+- crate 변경:
+  - `domain`: `RealmEmitter::emit`에 `fact: Option<RealmEventKind>` 추가. (1.18→1.19)
+  - `protocol`: `EventFact` 구조체 + `RealmEmit`에 `fact` 필드 + 코덱 + 라운드트립 테스트(13→14). (1.5→1.6)
+  - `node`: RealmCommand/RealmEvent `Broadcast`에 fact 관통 + `route_emit`/`emit` 시그니처 + `EventFact`↔`RealmEventKind` 변환 + 크로스노드 fact 보존 테스트. (1.8.1→1.9)
+  - `gateway`: dispatch가 `Broadcast` fact를 append_event(단일 소비자). (1.12→1.13)
+  - `rest-api`: 12개 emit 호출부에 fact 인자(3 사실+그룹DM 2 + 나머지 None), RecordingEmitter 테스트 더블 갱신. (1.19→1.20)
+- 문서: `decisions.md` D48 E1/E2 갱신, `node-wire.md` REALM_EMIT fact, TODO.
+- seam: E1 비트랜잭션(수용) · 웹훅 메시지 미기록 · 스냅샷/컴팩션 없음(전체 재생).
+
+---
+
+## [1.45.1] - 2026-06-18
+### 하드닝 — 액터 supervisor (Q7 해소, D50)
+- **Let-it-crash + Router lazy 재시작**: Realm 액터가 패닉으로 죽으면 `Router::local_realm`이 닫힌 메일박스를 감지해 **fresh 액터로 재spawn**(= D23 rehydrate). 기존엔 죽은 메일박스가 캐시에 남아 그 Realm이 프로세스 재시작 전까지 영구 사망하던 버그를 닫음. 액터 상태는 재구축 가능한 휘발 캐시(구독자표, DB-D5)뿐 + 메시지 진실은 Postgres(D24)라 fresh-spawn으로 충분(클라 자동 재구독 D13).
+- **actor-rt 계약 명문화**: `spawn` doc에 let-it-crash 계약(패닉=task 종료=메일박스 닫힘, 자동 재시작 안 함=상위 supervisor 책임). 런타임은 범용·미니멀 유지(새 의존성 0). 계약 단위 테스트 추가(`panicking_handler_closes_mailbox`).
+- crate 변경:
+  - `actor-rt`: `spawn` 계약 doc + 패닉→메일박스 닫힘 테스트(2→3 테스트). (1.0.0→1.0.1)
+  - `node`: `Router::local_realm`이 죽은 메일박스 감지→재spawn(supervisor, 3줄). (1.8.0→1.8.1)
+- 문서: `decisions.md` D50 신설 + Q7 해결 체크, TODO Q7 체크.
+- seam: 재시작 폭주 제한(restart intensity)·backoff 없음(study 범위 충분) · 크로스노드 RESUME과 함께 장애복구 그림 완성(후속).
+
+---
+
 ## [1.45.0] - 2026-06-16
 ### 새 기능 — CRDT 오프라인 동기화 (Phase 5, D49)
 - **상태 기반 CRDT(CvRDT)로 충돌 없는 멀티기기 동기화** — 여러 기기가 오프라인 편집 후 재연결 시 수렴. 핵심 = 순수·테스트 가능한 merge 엔진(결합·교환·멱등 semilattice join).

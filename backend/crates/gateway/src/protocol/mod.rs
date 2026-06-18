@@ -12,6 +12,8 @@ pub mod op {
     pub const IDENTIFY: u8 = 2;
     /// 클라 → 서버: 상태 변경(online/idle/dnd). D42 presence idle/dnd seam.
     pub const PRESENCE_UPDATE: u8 = 3;
+    /// 클라 → 서버: 음성 채널 입장/이동/퇴장 + self mute/deaf (D47 Voice 시그널링). Discord op 4와 동일.
+    pub const VOICE_STATE_UPDATE: u8 = 4;
     pub const RESUME: u8 = 6;
     pub const INVALID_SESSION: u8 = 9;
     pub const HELLO: u8 = 10;

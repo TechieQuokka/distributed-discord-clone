@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use auth::webauthn::{PasskeyAuthentication, PasskeyRegistration};
+use auth::webauthn::{DiscoverableAuthentication, PasskeyAuthentication, PasskeyRegistration};
 use auth::{PowKeys, TokenKeys, WebauthnService};
 use domain::blob::BlobStore;
 use domain::emit::{RealmEmitter, UserEmitter};
@@ -21,6 +21,8 @@ use crate::ratelimit::RateLimiter;
 pub enum Ceremony {
     Register { user_id: u64, state: Box<PasskeyRegistration> },
     Auth { user_id: u64, state: Box<PasskeyAuthentication> },
+    /// Usernameless(discoverable) 인증 (D19) — start 시 유저 미상, finish에서 자격증명으로 식별.
+    Discoverable { state: Box<DiscoverableAuthentication> },
 }
 
 /// ceremony_id → (상태, 만료 ms). 인메모리 — 멀티노드는 finish가 start한 노드로(seam).

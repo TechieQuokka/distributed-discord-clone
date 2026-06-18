@@ -23,6 +23,7 @@ enum Handshake {
 }
 
 /// READY 페이로드(초기 스냅샷). session_id + resume_token(D20) + user + realm id 목록 + 읽음 상태 + 친구 presence.
+#[allow(clippy::too_many_arguments)]
 fn ready_payload(
     session_id: u64,
     resume_token: &str,
@@ -31,6 +32,7 @@ fn ready_payload(
     realms: &[u64],
     read_states: Vec<Value>,
     presences: Vec<Value>,
+    last_message_ids: Vec<Value>,
 ) -> Value {
     json!({
         "session_id": session_id.to_string(),
@@ -39,7 +41,28 @@ fn ready_payload(
         "realms": realms.iter().map(|r| json!({ "id": r.to_string() })).collect::<Vec<_>>(),
         "read_states": read_states,
         "presences": presences,
+        // 채널별 마지막 메시지 id (D35/D48 warmup) — 클라 "최신으로 점프"용. 이벤트 로그 프로젝션으로
+        // 콜드 Realm 액터를 복원하고 액터 권위값을 싣는다(원격 소유 realm은 프로젝션 값 직접).
+        "last_message_ids": last_message_ids,
     })
+}
+
+/// 채널별 last_message_id 산출 + 로컬 액터 warmup (D35/D48). 이벤트 로그를 `RealmProjection`으로 재생해
+/// 콜드 액터(failover/Q7 respawn)를 복원하고, 로컬 소유면 액터 권위값(warm+라이브 send 반영)을, 원격
+/// 소유면 프로젝션 값(이 노드에 액터 없음)을 돌려준다. node는 IO 무지(P2)라 storage 읽기는 여기(엣지)서.
+/// seam: realm마다 전체 재생(O(events)) — 스냅샷/컴팩션은 D48 후속.
+async fn channel_last_ids<S: Store, T: NodeTransport>(
+    store: &S,
+    router: &node::Router<T>,
+    realm: domain::id::RealmId,
+) -> Vec<(u64, u64)> {
+    let log = store.replay_events(realm, 0).await.unwrap_or_default();
+    let proj = domain::event::RealmProjection::replay(&log);
+    let warm: Vec<(u64, u64)> = proj.last_message_by_channel.iter().map(|(&c, &m)| (c, m)).collect();
+    match router.warm_realm_last_ids(realm, warm.clone()).await {
+        Some(live) => live, // 로컬 소유: 액터 권위값.
+        None => warm,       // 원격 소유: 프로젝션 값 직접(seam: 원격 액터 warmup 조회 없음).
+    }
 }
 
 pub async fn handle_socket<S: Store + 'static, T: NodeTransport>(
@@ -100,10 +123,20 @@ async fn run_identify<S: Store + 'static, T: NodeTransport>(
         .collect();
     // 친구 presence 스냅샷(현재 온라인 친구).
     let presences = crate::presence::ready_presences(&*state.store, &state.presence, user_id).await;
+    // 채널별 last_message_id (D35/D48 warmup) — 콜드 Realm 액터를 이벤트 로그 프로젝션으로 복원하며 산출.
+    let mut last_message_ids: Vec<Value> = Vec::new();
+    for r in &realm_ids {
+        for (ch, mid) in channel_last_ids(&*state.store, &state.router, rid(*r)).await {
+            last_message_ids.push(json!({
+                "channel_id": ch.to_string(),
+                "last_message_id": mid.to_string(),
+            }));
+        }
+    }
     state.hub.dispatch_one(
         session_id,
         "READY",
-        ready_payload(session_id, &resume_token, user_id, username.as_deref(), &realm_ids, read_states, presences),
+        ready_payload(session_id, &resume_token, user_id, username.as_deref(), &realm_ids, read_states, presences, last_message_ids),
     );
 
     // 이제 팬아웃 대상으로 활성화 + Realm 구독.
@@ -119,7 +152,7 @@ async fn run_identify<S: Store + 'static, T: NodeTransport>(
         .await;
     }
 
-    pump(&mut socket, &state, Some(user_id), rx).await;
+    pump(&mut socket, &state, Some(user_id), session_id, rx).await;
     state.hub.detach(session_id); // 끊김: 버퍼 유지(RESUME 대비). grace 후 Hub가 purge.
     // 마지막 live 세션이 끊겼으면 presence 오프라인 전이.
     if state.hub.live_count(user_id) == 0 {
@@ -161,7 +194,7 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
                 )
                 .await;
             }
-            pump(&mut socket, &state, user_id, rx).await;
+            pump(&mut socket, &state, user_id, session_id, rx).await;
             state.hub.detach(session_id);
             if let Some(u) = user_id
                 && state.hub.live_count(u) == 0
@@ -173,8 +206,87 @@ async fn run_resume<S: Store + 'static, T: NodeTransport>(
             }
         }
         ResumeOutcome::Invalid => {
-            // 버퍼 밖/토큰 불일치 → 재IDENTIFY + REST 재조회 유도 (D24).
-            let _ = send(&mut socket, Outgoing::invalid_session()).await;
+            // 로컬에 세션 없음 → **크로스노드 RESUME**(세션 마이그레이션, D24): 원조 노드에서 핸드오프 시도.
+            // 토큰 불일치/버퍼 gap이면 원조가 거부 → INVALID. 원조가 죽었으면(버퍼 휘발) 타임아웃 → INVALID.
+            if let Some(m) = try_cross_node_resume(&state, session_id, &token, last_seq).await {
+                let user_id = m.user_id;
+                let rx = state.hub.import_migration(
+                    session_id, user_id, m.last_seq, m.resume_token, DEFAULT_REPLAY_CAP,
+                );
+                // 원조 버퍼에서 받은 미수신 프레임 재생(원래 seq 보존) → RESUMED.
+                let mut ok = true;
+                for f in m.frames {
+                    if socket.send(Message::Text(f.into())).await.is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok && send(&mut socket, Outgoing::resumed(m.last_seq)).await.is_err() {
+                    ok = false;
+                }
+                if !ok {
+                    state.hub.detach(session_id);
+                    return;
+                }
+                // 팬아웃 대상 활성화 + 유저 realm 재구독 → 구독자표(D12)를 이 노드로 이전(이벤트가 B로 흐름).
+                state.hub.activate(user_id, session_id);
+                let uid = UserId(Snowflake::from_raw(user_id));
+                let realm_ids: Vec<u64> = state
+                    .store
+                    .member_realm_ids(uid)
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| r.0.raw())
+                    .collect();
+                for r in &realm_ids {
+                    let _ = state.router.route_subscribe(rid(*r), uid, state.local_node_id).await;
+                }
+                if state.hub.live_count(user_id) == 1 {
+                    crate::presence::set_online(
+                        &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, user_id,
+                    )
+                    .await;
+                }
+                pump(&mut socket, &state, Some(user_id), session_id, rx).await;
+                state.hub.detach(session_id);
+                if state.hub.live_count(user_id) == 0 {
+                    crate::presence::set_offline(
+                        &state.presence, &state.hub, &*state.store, &state.router, state.local_node_id, user_id,
+                    )
+                    .await;
+                }
+            } else {
+                // 어느 노드에도 없음/거부 → 재IDENTIFY + REST 재조회 유도 (D24).
+                let _ = send(&mut socket, Outgoing::invalid_session()).await;
+            }
+        }
+    }
+}
+
+/// 크로스노드 RESUME (D24): 원조 노드에 `ResumeFetch` broadcast → `ResumeState` 대기(타임아웃).
+/// 원조만 세션을 가져 응답한다(server inbound가 `export_migration`→회신, `complete_migration`로 깨움).
+async fn try_cross_node_resume<S: Store, T: NodeTransport>(
+    state: &GatewayState<S, T>,
+    session_id: u64,
+    token: &str,
+    last_seq: u64,
+) -> Option<crate::hub::MigratedSession> {
+    let rx = state.hub.begin_migration(session_id);
+    state
+        .router
+        .broadcast(protocol::NodeMessage::ResumeFetch {
+            session_id,
+            token: token.to_string(),
+            last_seq,
+            requester: state.local_node_id,
+        })
+        .await;
+    match tokio::time::timeout(std::time::Duration::from_millis(2000), rx).await {
+        Ok(Ok(m)) if m.found => Some(m),
+        _ => {
+            state.hub.cancel_migration(session_id);
+            None
         }
     }
 }
@@ -184,6 +296,7 @@ async fn pump<S: Store + 'static, T: NodeTransport>(
     socket: &mut WebSocket,
     state: &GatewayState<S, T>,
     user_id: Option<u64>,
+    session_id: u64,
     mut rx: tokio::sync::mpsc::Receiver<Outgoing>,
 ) {
     loop {
@@ -205,6 +318,13 @@ async fn pump<S: Store + 'static, T: NodeTransport>(
                                         .await;
                                     }
                                 }
+                                // 음성 시그널링(D47): 입장/이동/퇴장 + self mute/deaf → 권한(CONNECT) →
+                                // 같은 Realm 구독자에 VOICE_STATE_UPDATE 팬아웃(기존 emit 경로 재사용, 신규 와이어 0).
+                                op::VOICE_STATE_UPDATE => {
+                                    if let Some(u) = user_id {
+                                        handle_voice_state(state, session_id, u, &inc.d).await;
+                                    }
+                                }
                                 _ => {} // RESUME/IDENTIFY는 핸드셰이크 단계 전용. 그 외 무시.
                             }
                         }
@@ -222,6 +342,69 @@ async fn pump<S: Store + 'static, T: NodeTransport>(
                 }
             }
         }
+    }
+}
+
+/// 음성 시그널링 op4 처리 (D47, 미디어 제외 D21). 입장/이동/퇴장 + self mute/deaf를 같은 Realm
+/// 구독자에 `VOICE_STATE_UPDATE`로 팬아웃(기존 emit 경로 재사용 — 신규 와이어/액터 상태 0, 스펙 §3).
+/// 입장 시 `VOICE_SERVER_UPDATE`(endpoint=null stub)를 이 세션에만 회신해 미디어 경계를 표식.
+async fn handle_voice_state<S: Store, T: NodeTransport>(
+    state: &GatewayState<S, T>,
+    session_id: u64,
+    user_id: u64,
+    d: &Value,
+) {
+    let parse_id = |v: &Value| v.as_str().and_then(|s| s.parse::<u64>().ok());
+    let Some(realm_raw) = d.get("realm_id").and_then(parse_id) else { return };
+    let realm = rid(realm_raw);
+    // channel_id null/누락 = 채널 떠남(퇴장).
+    let channel_raw: Option<u64> = d.get("channel_id").and_then(parse_id);
+    let self_mute = d.get("self_mute").and_then(Value::as_bool).unwrap_or(false);
+    let self_deaf = d.get("self_deaf").and_then(Value::as_bool).unwrap_or(false);
+
+    // 입장/이동: CONNECT 권한(채널 컨텍스트, D17/D47). 퇴장(None)은 무권한. 없으면 무시(Discord식).
+    if let Some(ch) = channel_raw {
+        use domain::permissions::Permissions;
+        let granted = crate::routes::effective_channel_perms(
+            &*state.store,
+            domain::id::ChannelId(Snowflake::from_raw(ch)),
+            realm,
+            UserId(Snowflake::from_raw(user_id)),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|p| p.contains(Permissions::CONNECT));
+        if !granted {
+            return;
+        }
+    }
+
+    // VOICE_STATE_UPDATE payload (생산 엣지가 JSON 단일 출처, D39). server_mute/deaf 모더레이션은 seam→false.
+    let payload = json!({
+        "realm_id": realm_raw.to_string(),
+        "channel_id": channel_raw.map(|c| c.to_string()),
+        "user_id": user_id.to_string(),
+        "self_mute": self_mute,
+        "self_deaf": self_deaf,
+        "server_mute": false,
+        "server_deaf": false,
+    })
+    .to_string();
+    // 같은 Realm 구독자에 팬아웃 — 멤버 이벤트와 같은 emit 경로(로컬/원격 자동, 이벤트소싱 fact 없음).
+    let _ = state.router.route_emit(realm, "VOICE_STATE_UPDATE".into(), payload, None).await;
+
+    // 입장 확정 시 VOICE_SERVER_UPDATE를 이 세션에만 회신 — 미디어 서버 경계(D21): endpoint=null stub.
+    if channel_raw.is_some() {
+        state.hub.dispatch_one(
+            session_id,
+            "VOICE_SERVER_UPDATE",
+            json!({
+                "realm_id": realm_raw.to_string(),
+                "endpoint": Value::Null,         // 미디어 SFU 없음(D21) — 시그널링 종료 표식.
+                "token": session_id.to_string(), // 미디어 인증 토큰은 설계만(stub).
+            }),
+        );
     }
 }
 

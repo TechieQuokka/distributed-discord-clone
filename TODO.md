@@ -1,7 +1,7 @@
 # TODO
 
 > 분산 Discord 클론 — 작업 추적. 설계 출처: [docs/architecture/decisions.md](docs/architecture/decisions.md).
-> 현재 단계: **Phase 5 진행** (v1.45.0 — SWIM D45/D46 + WebAuthn D19 + **이벤트 소싱 D48 + CRDT 오프라인 동기화 D49 + Voice 시그널링 설계 D47 + 하드닝(idle/dnd·파티션 사전생성)**). Phase 0~4 완료. Phase 5 잔여: 세부 하드닝(크로스노드 RESUME·D35 warmup·usernameless 등) · 액터 supervisor(Q7). MinIO는 **범위 제외**(사용자 결정 — 로컬 테스트 전용, BlobStore 포트는 유지). frontend(D30)는 최후순위. 로드맵 = D §4-R. 이어서 → RESUME.md.
+> 현재 단계: **Phase 5 완료** (v1.50.0 — SWIM D45/D46 + WebAuthn D19(**usernameless 포함**) + 이벤트 소싱 D48(**멤버/삭제 생산자 포함**) + CRDT D49 + **Voice 제어 평면 D47** + **액터 supervisor Q7/D50** + **D35 last_message_id warmup** + **크로스노드 RESUME=세션 마이그레이션 D24** + 하드닝(idle/dnd·파티션 사전생성)). Phase 0~5 전부 완료, 잔여 하드닝 7건 마감. 테스트 187. MinIO는 **범위 제외**(BlobStore 포트는 유지). **다음 = frontend(D30, R4 최후순위)**. 로드맵 = D §4-R. 이어서 → RESUME.md.
 
 범례: `[ ]` 미착수 · `[~]` 진행중 · `[x]` 완료
 
@@ -61,8 +61,8 @@
 - [x] Consistent Hashing 링 (D6) — vnode 포함
 - [x] Realm 2단 라우팅 (세션 소유 vs Realm 소유, D9)  # router: 소유판정+로컬/원격 subscribe·send + 크로스노드 fanout
 - [x] Realm-local 구독자 추적 + 팬아웃 (D12)  # 구독자표 + RealmFanout 와이어 크로스노드 배달 (in-process stub 상에서)
-- [x] Gateway RESUME — per-session seq + 재생 버퍼 (D24)  # Hub 영속 세션상태(seq+bounded버퍼+CSPRNG resume_token), detach/grace/replay/RESUMED, gap→INVALID
-- [x] Realm 상태 rehydrate (노드 재배치, D23)  # PING/PONG 생사판정(Membership)+owner_excluding failover; 새 소유 노드 actor fresh-spawn(Postgres 진실 보존). D35 캐시 warmup은 후속
+- [x] Gateway RESUME — per-session seq + 재생 버퍼 (D24)  # Hub 영속 세션상태(seq+bounded버퍼+CSPRNG resume_token), detach/grace/replay/RESUMED, gap→INVALID. **v1.50: 크로스노드 RESUME=세션 마이그레이션** — 타 노드 재연결 시 원조에서 핸드오프(ResumeFetch broadcast→export→ResumeState→import+재구독). wire 0x0203/0x0204
+- [x] Realm 상태 rehydrate (노드 재배치, D23)  # PING/PONG 생사판정(Membership)+owner_excluding failover; 새 소유 노드 actor fresh-spawn(Postgres 진실 보존). **v1.47: D35 채널별 last_message_id warmup** — 콜드 액터를 이벤트 로그 프로젝션으로 복원(엣지 gateway가 replay→RealmProjection→WarmAndGet, READY last_message_ids 소비). content 캐시 서빙은 후속 seam
 - [x] Backpressure — bounded 채널 + 느린 클라 끊기 (D27)  # Hub::push_live가 채널 가득 시 live drop→pump 종료·소켓 close; 버퍼 남아 RESUME 복구. 노드간/액터 메일박스 bounded
 - [x] **DST 하네스** — SimTransport + SimClock (D25)  # transport::sim(가상시간+시드 카오스: 지연/유실/파티션); Router/RealmActor에 Clock 주입→id 결정론; node/tests/dst.rs(재현성+파티션). 액터 가상실행기는 후속
 
@@ -104,18 +104,18 @@
 
 ## Phase 5 — 스트레치
 
-- [x] WebAuthn/Passkeys (D19)
+- [x] WebAuthn/Passkeys (D19)  # v1.49: usernameless(discoverable) 로그인 추가 — username 없이 user handle로 식별(conditional-ui), /auth/webauthn/login/discoverable/{start,finish}. 헤드리스 SoftPasskey 미지원→실 인증기 영역. 멀티노드 ceremony 공유는 seam
 - [x] CRDT 오프라인 동기화  # 상태기반 CvRDT(D49): domain::crdt 순수 툴킷(LwwRegister/LwwMap/OrSet/PnCounter, merge 법칙 8테스트) + 적용=유저 동기화 문서(LWW-Map). CrdtRepository 포트, storage LWW 가드 upsert(V21 user_crdt_entries), REST /users/@me/sync. 라이브 검증(2기기 오프라인 편집→충돌없이 수렴+툼스톤). OrSet/PnCounter 배선·WS push는 seam
 - [x] gossip discovery (SWIM, Q11)
-- [x] 이벤트 소싱 (선택, D23)  # 가산형 구현(D48): messages(진실) 위에 append-only realm_events(V20) + 순수 RealmProjection(domain, 결정론 fold) = CQRS. EventLogRepository 포트, dispatch가 MessageCreated append(단일 소비자 D24→seq 경합 없음). 라이브 검증(scenario→로그 1건). messages 비파괴. 멤버/삭제 생산자·트랜잭션 무결성·스냅샷은 seam
-- [x] Voice 시그널링 (미디어 제외, D21)  # 설계 전용(D47, protocol/voice-signaling.md): 시그널링=제어 평면만, 미디어(WebRTC/SFU/SRTP)는 D21 경계 밖. voice state=Realm 휘발 상태(D12/D42 동형)→REALM_FANOUT 재사용, op 4 + 권한 CONNECT/SPEAK. 코드 미구현(사용자 결정: Voice=문서만)
+- [x] 이벤트 소싱 (선택, D23)  # 가산형 구현(D48): messages(진실) 위에 append-only realm_events(V20) + 순수 RealmProjection(domain, 결정론 fold) = CQRS. EventLogRepository 포트, dispatch가 MessageCreated append(단일 소비자 D24→seq 경합 없음). 라이브 검증(scenario→로그 1건). messages 비파괴. **v1.46(E2): 멤버/삭제 생산자 배선** — emit에 타입 사실 동반→dispatch가 append(원격은 REALM_EMIT EventFact 슬롯, B 정석). E1=비트랜잭션 수용. 스냅샷/컴팩션·웹훅 메시지 미기록은 seam
+- [x] Voice 시그널링 (미디어 제외, D21)  # **v1.48 제어 평면 구현**(D47): gateway op 4→권한 CONNECT→기존 emit 경로로 VOICE_STATE_UPDATE 팬아웃(거의 코드 0)+VOICE_SERVER_UPDATE(endpoint=null stub). 미디어(WebRTC/SFU/SRTP)는 D21 영구 제외. seam: 액터 voice_states 맵·READY 스냅샷·서버 모더레이션(fanout-only). 설계=protocol/voice-signaling.md
 - [~] ~~MinIO 첨부 저장소 업그레이드 (D37)~~ **범위 제외**(사용자 결정 2026-06-16): 로컬 테스트 전용 + 확장 의사 없음 → MinIO 불필요. `LocalFsBlobStore`로 충분. **`BlobStore` 포트는 유지**(domain↔IO 경계 P2, MinIO 발판 아님). 필요해지면 같은 포트로 언제든 추가 가능(D37)
 
 ---
 
 ## ❓ 미결 디테일 (Phase 진입 시 결정)
 
-- [ ] Q7. 액터 supervisor/재시작 전략 (Phase 2)
+- [x] Q7. 액터 supervisor/재시작 전략 (Phase 2) — D50: let-it-crash + Router lazy 재시작(닫힌 메일박스 감지→fresh 재spawn=D23 rehydrate). actor-rt 계약+테스트, supervisor는 Router
 - [x] Q9. CLI 시나리오 스크립트 포맷 (Phase 1) — `scenario` 서브커맨드로 해결
 - [x] Q10. 검색 구현 세부 (Phase 4) — Postgres FTS(tsvector 생성컬럼+GIN, websearch_to_tsquery), 길드 검색 + 채널 권한 필터로 해결
 - [x] Q11. gossip discovery + 전역 presence (Phase 3/5) — presence=D42/D43, SWIM 동적 합류=D45, anti-entropy=D46

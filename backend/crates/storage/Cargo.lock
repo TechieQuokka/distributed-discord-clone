@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "1.18.0"
+version = "1.20.0"
 dependencies = [
  "bitflags",
  "thiserror",

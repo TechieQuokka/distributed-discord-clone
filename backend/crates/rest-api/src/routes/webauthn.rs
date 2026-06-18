@@ -31,6 +31,9 @@ pub fn routes<S: Store + 'static>() -> axum::Router<AppState<S>> {
         .route("/auth/webauthn/register/finish", post(register_finish::<S>))
         .route("/auth/webauthn/login/start", post(login_start::<S>))
         .route("/auth/webauthn/login/finish", post(login_finish::<S>))
+        // Usernameless(discoverable) 로그인 (D19) — username 없이.
+        .route("/auth/webauthn/login/discoverable/start", post(discoverable_start::<S>))
+        .route("/auth/webauthn/login/discoverable/finish", post(discoverable_finish::<S>))
 }
 
 /// webauthn 미설정이면 404. 설정됐으면 서비스 반환.
@@ -171,6 +174,68 @@ async fn login_finish<S: Store + 'static>(
     }
 
     let uid = UserId(domain::id::Snowflake::from_raw(user_id));
+    let resp = issue_tokens(&st, uid, None).await?;
+    Ok(Json(serde_json::to_value(resp).unwrap_or(Value::Null)))
+}
+
+// ─── Usernameless (discoverable) 로그인 (D19) ────────────────────────────────
+// username 없이: 인증기가 resident key로 유저를 고른다. start는 누구인지 모른 채 challenge만 발급,
+// finish에서 자격증명의 user handle로 유저 식별 → 그 유저 passkey로 검증.
+
+async fn discoverable_start<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+) -> Result<Json<Value>, ApiError> {
+    let svc = require_webauthn(&st)?;
+    let (rcr, state) =
+        svc.start_discoverable_auth().map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cid = st.snowflakes.next(st.clock.now_ms()).raw();
+    let expiry = st.clock.now_ms() + CEREMONY_TTL_MS;
+    st.ceremonies
+        .lock()
+        .unwrap()
+        .insert(cid, (Ceremony::Discoverable { state: Box::new(state) }, expiry));
+    Ok(Json(json!({ "ceremony_id": cid.to_string(), "options": rcr })))
+}
+
+async fn discoverable_finish<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    Json(req): Json<LoginFinishReq>,
+) -> Result<Json<Value>, ApiError> {
+    let svc = require_webauthn(&st)?;
+    let cid: u64 = req.ceremony_id.parse().map_err(|_| ApiError::BadRequest("bad ceremony_id".into()))?;
+    let state = take_ceremony(&st, cid)?;
+    let Ceremony::Discoverable { state } = state else {
+        return Err(ApiError::BadRequest("ceremony type mismatch".into()));
+    };
+    // 자격증명의 user handle → 유저 Snowflake 식별 → 그 유저 passkey 로드.
+    let snowflake = svc.identify_discoverable(&req.credential).map_err(|_| ApiError::Unauthorized)?;
+    let uid = UserId(domain::id::Snowflake::from_raw(snowflake));
+    let creds: Vec<String> =
+        st.store.list_credentials(uid).await?.into_iter().map(|c| c.passkey_json).collect();
+    let passkeys = load_passkeys(&creds);
+    if passkeys.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+    let res = svc
+        .finish_discoverable_auth(&req.credential, *state, &passkeys)
+        .map_err(|_| ApiError::Unauthorized)?;
+
+    // counter 진전 시 갱신(클론 탐지).
+    if res.needs_update() {
+        let cred_bytes: Vec<u8> = res.cred_id().as_ref().to_vec();
+        for c in st.store.list_credentials(uid).await? {
+            if c.credential_id == cred_bytes {
+                if let Ok(mut pk) = serde_json::from_str::<Passkey>(&c.passkey_json) {
+                    if pk.update_credential(&res).is_some() {
+                        if let Ok(j) = serde_json::to_string(&pk) {
+                            st.store.update_credential(&cred_bytes, &j).await?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let resp = issue_tokens(&st, uid, None).await?;
     Ok(Json(serde_json::to_value(resp).unwrap_or(Value::Null)))
 }

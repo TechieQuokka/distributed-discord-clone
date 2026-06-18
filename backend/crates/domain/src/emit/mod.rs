@@ -10,6 +10,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use crate::event::RealmEventKind;
 use crate::id::{RealmId, UserId};
 
 /// `Send` 박스 future 별칭 (dyn 호환).
@@ -18,8 +19,17 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Realm 실시간 이벤트 emit 포트 (D39). 구독자표(D12)를 타는 **Realm 단위** 팬아웃.
 pub trait RealmEmitter: Send + Sync {
     /// `t` = DISPATCH 이벤트 이름(`"GUILD_MEMBER_ADD"` 등), `payload` = 직렬화된 JSON.
+    /// `fact` = 이 이벤트의 **타입화된 도메인 사실**(이벤트 소싱 로그용, D48/E2). 있으면 소유 노드의
+    /// dispatch(단일 직렬 소비자, D24)가 append_event로 기록 — 멤버 입퇴장/메시지 삭제 등. 없으면 None
+    /// (팬아웃만, 로그 무관). 클라용 `payload`(JSON)와 **별개**의 사실 스트림(D48).
     /// fire-and-forget — 팬아웃은 소유 노드 액터를 거쳐 비동기로 흐른다.
-    fn emit(&self, realm: RealmId, t: String, payload: String) -> BoxFuture<'_, ()>;
+    fn emit(
+        &self,
+        realm: RealmId,
+        t: String,
+        payload: String,
+        fact: Option<RealmEventKind>,
+    ) -> BoxFuture<'_, ()>;
 }
 
 /// **유저 단위** 실시간 이벤트 emit 포트 (친구·차단 등 Realm 무관 이벤트).

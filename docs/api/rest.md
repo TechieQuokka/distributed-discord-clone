@@ -102,8 +102,10 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | POST | `/auth/webauthn/register/finish` | (인증) `{ceremony_id, credential}` → Passkey 저장 |
 | POST | `/auth/webauthn/login/start` | `{username}` → 인증 challenge `{ceremony_id, options}` |
 | POST | `/auth/webauthn/login/finish` | `{ceremony_id, credential}` → 서명 검증 후 `{access, refresh}` (암호 없는 로그인) |
+| POST | `/auth/webauthn/login/discoverable/start` | (본문 없음) **usernameless** challenge `{ceremony_id, options}` (D19, v1.49) |
+| POST | `/auth/webauthn/login/discoverable/finish` | `{ceremony_id, credential}` → user handle로 유저 식별 → 서명 검증 후 `{access, refresh}` |
 
-> **WebAuthn/Passkeys (Phase 5, D19, 구현됨)**: `webauthn-rs`(P6) 기반 FIDO2 공개키 자격증명. ceremony 중간 상태는 휘발 인메모리(DB-D5, ceremony_id 키). 자격증명은 `webauthn_credentials`(V18, `passkey JSONB`). RP = env `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_ORIGIN`(기본 localhost). 미설정 노드는 404. seam: usernameless·멀티노드 ceremony 공유는 후속.
+> **WebAuthn/Passkeys (Phase 5, D19, 구현됨)**: `webauthn-rs`(P6) 기반 FIDO2 공개키 자격증명. ceremony 중간 상태는 휘발 인메모리(DB-D5, ceremony_id 키). 자격증명은 `webauthn_credentials`(V18, `passkey JSONB`). RP = env `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_ORIGIN`(기본 localhost). 미설정 노드는 404. **usernameless(discoverable, v1.49)**: username 없이 인증기가 resident key로 유저 선택 → `identify_discoverable`이 user handle(Uuid)에서 유저 식별(`conditional-ui` feature). 헤드리스 SoftPasskey는 discoverable 탐색 미지원→실제 인증기 영역. seam: 멀티노드 ceremony 공유(start/finish 같은 노드)는 후속.
 
 ---
 

@@ -178,7 +178,7 @@ async fn edit_message<S: Store + 'static>(
     }
 
     let payload = message_update_payload(&msg, content);
-    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_UPDATE".into(), payload).await;
+    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_UPDATE".into(), payload, None).await;
     Ok(Json(MessageView {
         id: mid.0.raw().to_string(),
         channel_id: cid.0.raw().to_string(),
@@ -209,7 +209,9 @@ async fn delete_message<S: Store + 'static>(
     }
 
     let payload = message_delete_payload(cid, mid);
-    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_DELETE".into(), payload).await;
+    // 이벤트 소싱 사실(D48/E2): 메시지 소프트 삭제 → MessageDeleted. dispatch 단일 소비자가 append.
+    let fact = domain::event::RealmEventKind::MessageDeleted { message_id: mid, channel_id: cid };
+    let _ = st.emitter.emit(msg.realm_id, "MESSAGE_DELETE".into(), payload, Some(fact)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -247,7 +249,7 @@ async fn add_reaction<S: Store + 'static>(
     // 새로 추가된 경우에만 팬아웃 (멱등 — 중복은 조용히 OK).
     if st.store.add_reaction(mid, user, emoji).await? {
         let payload = reaction_payload(cid, mid, user, emoji);
-        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_ADD".into(), payload).await;
+        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_ADD".into(), payload, None).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -271,7 +273,7 @@ async fn remove_reaction<S: Store + 'static>(
 
     if st.store.remove_reaction(mid, user, emoji).await? {
         let payload = reaction_payload(cid, mid, user, emoji);
-        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_REMOVE".into(), payload).await;
+        let _ = st.emitter.emit(msg.realm_id, "MESSAGE_REACTION_REMOVE".into(), payload, None).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

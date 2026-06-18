@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "actor-rt"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "thiserror",
  "tokio",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "1.18.0"
+version = "1.20.0"
 dependencies = [
  "bitflags",
  "thiserror",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "node"
-version = "1.8.0"
+version = "1.10.1"
 dependencies = [
  "actor-rt",
  "domain",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "1.5.0"
+version = "1.7.0"
 dependencies = [
  "domain",
  "thiserror",
