@@ -181,7 +181,9 @@ async fn execute_webhook<S: Store + 'static>(
         })
         .await?;
     let payload = webhook_message_payload(mid, wh.channel_id, author, wid.0.raw(), content);
-    let _ = st.emitter.emit(wh.realm_id, "MESSAGE_CREATE".into(), payload).await;
+    // seam(D48/E2): 웹훅 메시지는 Realm 액터를 우회(persist+emit)하므로 이벤트 로그엔 미기록(fact=None).
+    // 정식 MessageCreated append는 액터 경로(dispatch MessageCreated 분기)만 — 웹훅 사실화는 후속.
+    let _ = st.emitter.emit(wh.realm_id, "MESSAGE_CREATE".into(), payload, None).await;
 
     Ok((
         StatusCode::OK,

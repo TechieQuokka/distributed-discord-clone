@@ -10,7 +10,7 @@
 //! 직렬화(코드↔jsonb)는 **storage 어댑터가 소유**(domain은 serde 무의존, P2). domain은
 //! 타입과 `code()`만 노출하고, storage가 enum을 (code, payload)로 매핑/역매핑한다.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{ChannelId, MessageId, RealmId, UserId};
 
@@ -57,6 +57,9 @@ pub struct RealmProjection {
     pub message_count: u64,
     /// 마지막으로 생성된 메시지 id (D35 캐시 warmup 힌트).
     pub last_message_id: Option<u64>,
+    /// **채널별** 마지막 메시지 id (D35 warmup — Realm 액터 콜드 시 채널 last_message_id 복원).
+    /// 클라 READY가 "최신으로 점프"에 쓰는 채널별 신호(Discord식). Created 시 채널별 max.
+    pub last_message_by_channel: BTreeMap<u64, u64>,
     /// 마지막으로 적용한 seq (재생 커서 — 증분 재생용).
     pub last_seq: u64,
 }
@@ -69,12 +72,16 @@ impl RealmProjection {
     /// 이벤트 1건을 접는다(누적). 같은 이벤트 시퀀스는 항상 같은 상태를 만든다(결정론).
     pub fn apply(&mut self, kind: &RealmEventKind) {
         match kind {
-            RealmEventKind::MessageCreated { message_id, .. } => {
+            RealmEventKind::MessageCreated { message_id, channel_id, .. } => {
                 self.message_count += 1;
                 let raw = message_id.0.raw();
                 if self.last_message_id.is_none_or(|cur| raw > cur) {
                     self.last_message_id = Some(raw);
                 }
+                // 채널별 last id = max (이벤트 순서 무관 결정론). D35 warmup 입력.
+                let ch = channel_id.0.raw();
+                let slot = self.last_message_by_channel.entry(ch).or_insert(raw);
+                *slot = (*slot).max(raw);
             }
             RealmEventKind::MessageDeleted { .. } => {
                 self.message_count = self.message_count.saturating_sub(1);
@@ -136,6 +143,7 @@ mod tests {
         assert_eq!(p.members, BTreeSet::from([20]), "10 이탈 → 20만 남음");
         assert_eq!(p.message_count, 1, "생성 2 - 삭제 1");
         assert_eq!(p.last_message_id, Some(200), "마지막 생성 id");
+        assert_eq!(p.last_message_by_channel, BTreeMap::from([(5, 200)]), "채널 5의 last id=200 (D35 warmup)");
         assert_eq!(p.last_seq, 6);
     }
 

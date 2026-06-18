@@ -1,6 +1,6 @@
 [package]
 name = "domain"
-version = "1.18.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
+version = "1.20.0"     # 독립 버전 관리 (CLAUDE.md R3/R7)
 edition = "2024"
 license = "MIT"
 

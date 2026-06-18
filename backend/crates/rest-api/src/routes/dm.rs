@@ -184,7 +184,9 @@ async fn add_recipient<S: Store + 'static>(
 
     st.store.add_member(info.id, target).await?;
     let payload = recipient_add_payload(info.id, cid, &user);
-    let _ = st.emitter.emit(info.id, "CHANNEL_RECIPIENT_ADD".into(), payload).await;
+    // 이벤트 소싱 사실(D48/E2): 그룹DM 참가자 추가 = Realm 멤버 합류 → MemberJoined(projection 멤버집합 정확).
+    let fact = domain::event::RealmEventKind::MemberJoined { user: target };
+    let _ = st.emitter.emit(info.id, "CHANNEL_RECIPIENT_ADD".into(), payload, Some(fact)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -213,6 +215,8 @@ async fn remove_recipient<S: Store + 'static>(
         return Err(ApiError::NotFound);
     }
     let payload = recipient_remove_payload(info.id, cid, target);
-    let _ = st.emitter.emit(info.id, "CHANNEL_RECIPIENT_REMOVE".into(), payload).await;
+    // 이벤트 소싱 사실(D48/E2): 그룹DM 참가자 제거/탈퇴 = Realm 멤버 이탈 → MemberLeft.
+    let fact = domain::event::RealmEventKind::MemberLeft { user: target };
+    let _ = st.emitter.emit(info.id, "CHANNEL_RECIPIENT_REMOVE".into(), payload, Some(fact)).await;
     Ok(StatusCode::NO_CONTENT)
 }

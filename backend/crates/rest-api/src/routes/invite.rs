@@ -124,7 +124,9 @@ async fn redeem_invite<S: Store + 'static>(
     if let Some(u) = st.store.find_by_id(user).await? {
         let member = st.store.get_member(realm_id, user).await?;
         let payload = crate::events::member_upsert_payload(realm_id, &u, member.as_ref());
-        let _ = st.emitter.emit(realm_id, "GUILD_MEMBER_ADD".into(), payload).await;
+        // 이벤트 소싱 사실(D48/E2): 멤버 합류 → MemberJoined. dispatch 단일 소비자가 append.
+        let fact = domain::event::RealmEventKind::MemberJoined { user };
+        let _ = st.emitter.emit(realm_id, "GUILD_MEMBER_ADD".into(), payload, Some(fact)).await;
     }
 
     let channels = st

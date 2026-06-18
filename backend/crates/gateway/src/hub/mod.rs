@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{Outgoing, ServerEvent};
 
@@ -78,6 +78,28 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct Hub {
     inner: Arc<Mutex<Inner>>,
+    /// 진행 중 크로스노드 RESUME 마이그레이션 (session_id → 응답 대기 oneshot). 요청 노드측.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<MigratedSession>>>>,
+}
+
+/// 원조 노드가 핸드오프한 세션 상태 (크로스노드 RESUME, D24). 요청 노드가 import에 사용.
+pub struct MigratedSession {
+    pub found: bool,
+    pub user_id: u64,
+    pub last_seq: u64,
+    pub resume_token: String,
+    /// 놓친 프레임(직렬화된 JSON, last_seq 이후) — 요청 노드가 클라에 재생.
+    pub frames: Vec<String>,
+}
+
+/// `export_migration` 결과 — 원조 노드측.
+pub enum MigrationExport {
+    /// 이 노드에 세션 없음 → 응답하지 않음(다른 노드가 원조).
+    NotHere,
+    /// 세션은 있으나 토큰 불일치/버퍼 gap → 빠른 거부(found=false 회신).
+    Reject,
+    /// 핸드오프 성공 — 세션을 이 노드에서 제거하고 상태를 회신.
+    Ok { user_id: u64, last_seq: u64, resume_token: String, frames: Vec<String> },
 }
 
 /// RESUME 시도 결과.
@@ -222,6 +244,90 @@ impl Hub {
             e.buffer.iter().filter(|f| f.s.map(|s| s > last_seq).unwrap_or(false)).cloned().collect();
         ResumeOutcome::Resumed { rx, replay, last_seq: e.seq }
     }
+
+    // ─── 크로스노드 RESUME = 세션 마이그레이션 (D24) ──────────────────────────────
+    // 재연결이 원조가 아닌 노드에 닿으면, 그 노드가 원조에 ResumeFetch broadcast → 원조가
+    // export(검증+미수신 프레임 수집+세션 제거)해 ResumeState 회신 → 요청 노드가 import.
+
+    /// 원조 노드측: 세션을 검증하고 핸드오프 상태를 산출(성공 시 **세션 제거** = 마이그레이션).
+    /// `resume`와 동일한 자격 검사(토큰·gap). 성공 시 미수신 프레임을 JSON 문자열로 직렬화.
+    pub fn export_migration(&self, session_id: u64, token: &str, last_seq: u64) -> MigrationExport {
+        let mut inner = self.inner.lock().unwrap();
+        inner.purge_expired();
+        let Some(e) = inner.sessions.get(&session_id) else {
+            return MigrationExport::NotHere;
+        };
+        if e.resume_token != token || last_seq > e.seq {
+            return MigrationExport::Reject;
+        }
+        let earliest = e.seq - e.buffer.len() as u64 + 1;
+        if !e.buffer.is_empty() && last_seq + 1 < earliest {
+            return MigrationExport::Reject;
+        }
+        if e.buffer.is_empty() && last_seq != e.seq {
+            return MigrationExport::Reject;
+        }
+        let frames: Vec<String> = e
+            .buffer
+            .iter()
+            .filter(|f| f.s.map(|s| s > last_seq).unwrap_or(false))
+            .map(|f| f.to_json())
+            .collect();
+        let out = MigrationExport::Ok {
+            user_id: e.user_id,
+            last_seq: e.seq,
+            resume_token: e.resume_token.clone(),
+            frames,
+        };
+        inner.drop_session(session_id); // 세션은 이제 요청 노드 소유 — 여기선 제거.
+        out
+    }
+
+    /// 요청 노드측: 핸드오프된 세션을 이 노드에 재생성. seq=last_seq, **빈 버퍼**(놓친 프레임은
+    /// 호출측이 직접 클라에 재생) — 다음 RESUME은 last_seq==seq라 정상. (rx 반환, activate는 별도.)
+    pub fn import_migration(
+        &self,
+        session_id: u64,
+        user_id: u64,
+        last_seq: u64,
+        resume_token: String,
+        cap: usize,
+    ) -> mpsc::Receiver<Outgoing> {
+        let (tx, rx) = mpsc::channel(cap);
+        let mut inner = self.inner.lock().unwrap();
+        inner.sessions.insert(
+            session_id,
+            SessionEntry {
+                user_id,
+                seq: last_seq,
+                cap,
+                buffer: VecDeque::new(),
+                live: Some(tx),
+                resume_token,
+                detached_at: None,
+            },
+        );
+        rx
+    }
+
+    /// 요청 노드측: 마이그레이션 응답 대기 등록. broadcast 전에 호출 → 수신 Receiver 반환.
+    pub fn begin_migration(&self, session_id: u64) -> oneshot::Receiver<MigratedSession> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(session_id, tx);
+        rx
+    }
+
+    /// 요청 노드측: 원조가 보낸 ResumeState를 대기 중 핸들러에 전달 (server inbound 루프가 호출).
+    pub fn complete_migration(&self, session_id: u64, migrated: MigratedSession) {
+        if let Some(tx) = self.pending.lock().unwrap().remove(&session_id) {
+            let _ = tx.send(migrated);
+        }
+    }
+
+    /// 대기 등록 해제 (타임아웃/실패 정리).
+    pub fn cancel_migration(&self, session_id: u64) {
+        self.pending.lock().unwrap().remove(&session_id);
+    }
 }
 
 // 유저 단위 이벤트 포트(`UserEmitter`) 구현은 `user_route::UserRouter`(D43)로 이전 —
@@ -260,6 +366,39 @@ mod tests {
 
     fn ev(content: &str) -> ServerEvent {
         ServerEvent { t: "MESSAGE_CREATE".into(), d: json!({ "content": content }) }
+    }
+
+    /// 크로스노드 RESUME(D24): 원조 export(검증+미수신 프레임+세션 제거) → 타 노드 import 라운드트립.
+    #[tokio::test]
+    async fn cross_node_migration_export_import() {
+        let origin = Hub::new();
+        let (_rx, token) = origin.attach(7, 100, 16);
+        origin.activate(7, 100);
+        origin.deliver(&[7], &ev("a")); // seq 1
+        origin.deliver(&[7], &ev("b")); // seq 2
+
+        // 잘못된 토큰 → Reject.
+        assert!(matches!(origin.export_migration(100, "bad", 0), MigrationExport::Reject));
+        // 미지 세션 → NotHere.
+        assert!(matches!(origin.export_migration(999, &token, 0), MigrationExport::NotHere));
+
+        // 클라 last_seq=1 → 놓친 프레임(seq 2) 1개 + 세션 제거.
+        let MigrationExport::Ok { user_id, last_seq, resume_token, frames } =
+            origin.export_migration(100, &token, 1)
+        else {
+            panic!("expected Ok export");
+        };
+        assert_eq!(user_id, 7);
+        assert_eq!(last_seq, 2);
+        assert_eq!(frames.len(), 1, "seq 2만 놓침");
+        assert!(origin.session_user(100).is_none(), "원조에서 세션 제거(마이그레이션)");
+
+        // 타 노드로 import → 세션 재생성, seq=2(빈 버퍼).
+        let dest = Hub::new();
+        let _rx2 = dest.import_migration(100, user_id, last_seq, resume_token.clone(), 16);
+        assert_eq!(dest.session_user(100), Some(7));
+        // 이어진 RESUME(last_seq=2 == seq, 빈 버퍼) → 정상 재개.
+        assert!(matches!(dest.resume(100, &resume_token, 2, 16), ResumeOutcome::Resumed { .. }));
     }
 
     /// 배달이 세션별 단조 seq를 부여하고 버퍼에 적재한다.

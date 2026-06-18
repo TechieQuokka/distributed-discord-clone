@@ -1,6 +1,6 @@
 [package]
 name = "auth"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 license = "MIT"
 
@@ -11,7 +11,8 @@ rand = "0.10.1"
 sha2 = "0.11.0"
 thiserror = "2.0.18"
 totp-rs = { version = "5.7.1", features = ["otpauth"] }
-webauthn-rs = "0.5.5"
+# conditional-ui = usernameless(discoverable) 인증 API (start/identify/finish_discoverable, D19).
+webauthn-rs = { version = "0.5.5", features = ["conditional-ui"] }
 
 [dev-dependencies]
 webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }

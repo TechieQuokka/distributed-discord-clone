@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use actor_rt::Actor;
+use domain::event::RealmEventKind;
 use domain::id::{ChannelId, MessageId, RealmId, Snowflake, SnowflakeGenerator, UserId};
 use tokio::sync::{mpsc, oneshot};
 
@@ -29,7 +30,12 @@ pub enum RealmCommand {
     },
     /// 비-메시지 이벤트 팬아웃 (범용 envelope, D39). persist 없이 구독자표로 방출.
     /// `t`=DISPATCH 이벤트 이름, `payload`=직렬화된 JSON(불투명).
-    Broadcast { t: String, payload: String },
+    /// `fact`=이벤트 소싱 사실(D48/E2). 있으면 dispatch(단일 소비자, D24)가 append_event. 없으면 팬아웃만.
+    Broadcast { t: String, payload: String, fact: Option<RealmEventKind> },
+    /// 채널별 last_message_id warmup + 조회 (D35/D48). `warm`=(channel, last_id) 목록(이벤트 로그
+    /// 프로젝션에서 산출, 엣지가 주입 — node는 IO 무지 P2). 액터가 max-merge(콜드 액터 복원, 멱등)
+    /// 후 현재 채널별 last id를 회신. 가산 send로 갱신되는 라이브 상태와 합쳐 권위값을 돌려준다.
+    WarmAndGet { warm: Vec<(u64, u64)>, reply: oneshot::Sender<Vec<(u64, u64)>> },
 }
 
 /// Realm이 방출하는 이벤트(팬아웃 대상 포함).
@@ -53,6 +59,8 @@ pub enum RealmEvent {
         realm: RealmId,
         t: String,
         payload: String,
+        /// 이벤트 소싱 사실(D48/E2). Some이면 dispatch가 append_event(단일 소비자, D24).
+        fact: Option<RealmEventKind>,
         /// 팬아웃 대상 (user, node) — 구독자표 스냅샷 (D12).
         targets: Vec<(UserId, u64)>,
     },
@@ -66,6 +74,8 @@ pub struct RealmActor {
     clock: Arc<dyn Clock>,
     /// user(raw) → node. 팬아웃 위치추적 (D12).
     subscribers: HashMap<u64, u64>,
+    /// channel(raw) → 마지막 메시지 id. send 시 갱신 + 콜드 시 이벤트 로그 프로젝션으로 warmup (D35/D48).
+    last_by_channel: HashMap<u64, u64>,
     events: mpsc::Sender<RealmEvent>,
 }
 
@@ -81,6 +91,7 @@ impl RealmActor {
             snowflakes,
             clock,
             subscribers: HashMap::new(),
+            last_by_channel: HashMap::new(),
             events,
         }
     }
@@ -108,6 +119,8 @@ impl Actor for RealmActor {
                 // 액터가 단일 소유자로서 ID·순서를 확정(D24). persist는 events 소비측(드라이버)이
                 // 팬아웃 전에 수행(persist-then-fanout) — node 코어는 IO 무의존 유지(P2).
                 let id = MessageId(self.snowflakes.next(self.clock.now_ms()));
+                // 채널별 last id 라이브 갱신 (D35) — 새 메시지는 항상 최신(단조 generator, D11).
+                self.last_by_channel.insert(channel_id.0.raw(), id.0.raw());
                 let event = RealmEvent::MessageCreated {
                     realm: self.realm_id,
                     channel_id,
@@ -121,15 +134,27 @@ impl Actor for RealmActor {
                 let _ = self.events.send(event).await;
                 let _ = reply.send(id);
             }
-            RealmCommand::Broadcast { t, payload } => {
+            RealmCommand::Broadcast { t, payload, fact } => {
                 // 비-메시지 이벤트: persist 없이 현재 구독자 스냅샷으로 방출 (D39).
+                // fact는 그대로 통과 — dispatch(단일 소비자)가 append_event 판단 (D48/E2).
                 let event = RealmEvent::Broadcast {
                     realm: self.realm_id,
                     t,
                     payload,
+                    fact,
                     targets: self.target_snapshot(),
                 };
                 let _ = self.events.send(event).await;
+            }
+            RealmCommand::WarmAndGet { warm, reply } => {
+                // 콜드 액터 복원(D35/D48): 이벤트 로그 프로젝션 값과 라이브 값을 max-merge(멱등·순서무관).
+                for (ch, mid) in warm {
+                    let slot = self.last_by_channel.entry(ch).or_insert(mid);
+                    *slot = (*slot).max(mid);
+                }
+                let snapshot: Vec<(u64, u64)> =
+                    self.last_by_channel.iter().map(|(&c, &m)| (c, m)).collect();
+                let _ = reply.send(snapshot);
             }
         }
     }
@@ -238,6 +263,7 @@ mod tests {
         addr.send(RealmCommand::Broadcast {
             t: "GUILD_MEMBER_ADD".into(),
             payload: r#"{"x":1}"#.into(),
+            fact: None,
         })
         .await
         .unwrap();
@@ -248,6 +274,28 @@ mod tests {
         assert_eq!(t, "GUILD_MEMBER_ADD");
         assert_eq!(payload, r#"{"x":1}"#);
         assert_eq!(targets.len(), 2);
+    }
+
+    /// WarmAndGet(D35/D48): 콜드 액터를 이벤트 로그 프로젝션 값으로 복원(max-merge·멱등).
+    #[tokio::test]
+    async fn warm_and_get_channel_last_ids() {
+        use std::collections::HashMap;
+        let (etx, _erx) = mpsc::channel(16);
+        let addr = spawn(
+            RealmActor::new(realm(9), mkgen(1), Arc::new(ManualClock::new(EPOCH_MS + 1)), etx),
+            16,
+        );
+        async fn warm(a: &actor_rt::Mailbox<RealmCommand>, w: Vec<(u64, u64)>) -> HashMap<u64, u64> {
+            let (tx, rx) = oneshot::channel();
+            a.send(RealmCommand::WarmAndGet { warm: w, reply: tx }).await.unwrap();
+            rx.await.unwrap().into_iter().collect()
+        }
+        // 콜드 → 프로젝션 주입.
+        assert_eq!(warm(&addr, vec![(5, 100), (6, 200)]).await, HashMap::from([(5, 100), (6, 200)]));
+        // 더 이른 값 재주입 → max-merge로 무시(멱등).
+        assert_eq!(warm(&addr, vec![(5, 50)]).await, HashMap::from([(5, 100), (6, 200)]));
+        // 더 늦은 값 → 채택.
+        assert_eq!(warm(&addr, vec![(5, 300)]).await, HashMap::from([(5, 300), (6, 200)]));
     }
 
     /// 회귀(D11): 같은 노드의 두 Realm이 **공유 generator**를 쓰면 같은 ms에도 ID가 유일.

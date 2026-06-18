@@ -97,6 +97,8 @@ offset  size  field
 | 0x0111 | `UNSUBSCRIBE` | →소유노드 | 구독 해제 |
 | 0x0201 | `PRESENCE_GOSSIP` | 양방향 | presence 델타 전파 (Phase 3, D12). **D46**: 신규 노드 합류 시 anti-entropy 스냅샷 push에도 재사용 |
 | 0x0202 | `USER_DELIVER` | →호스팅 노드 | Realm 무관 유저 이벤트(친구·읽음 등)를 대상 유저 호스팅 노드에 **타깃** 배달 (D43) |
+| 0x0203 | `RESUME_FETCH` | broadcast→원조 | 크로스노드 RESUME(D24): 재연결 닿은 노드가 원조에 세션 핸드오프 요청. `session_id, token, last_seq, requester` |
+| 0x0204 | `RESUME_STATE` | →요청 노드 | 원조→요청: 세션 상태 핸드오프. `session_id, found:bool, user_id, last_seq, resume_token, frames:Vec<String>`(미수신 프레임 JSON). 원조는 응답과 함께 세션 제거 |
 | 0x0301 | `SWIM_JOIN` | →seed | 신규 노드 합류 요청 (introducer에게 자기 addr/incarnation 전달, D45) |
 | 0x0302 | `SWIM_PING` | 양방향 | SWIM 주기 탐침 (멤버 델타 피기백, D45) |
 | 0x0303 | `SWIM_ACK` | 양방향 | SWIM_PING/PING_REQ 응답 (멤버 델타 피기백) |
@@ -140,7 +142,7 @@ target_users  : Vec<u64>       # 이 노드에서 푸시할 대상 유저 id
 
 > **구현 현황 (Phase 3, D39 — 범용 envelope).** 위 `REALM_COMMAND`/`REALM_FANOUT`은 edit/delete/react까지 포함한 목표 설계다. 현재 `protocol` crate는 다음을 구현한다 — 메시지 전송은 전용 명령으로, 그 외 이벤트는 **범용 `(t, payload)` envelope**(D39)로:
 > - `REALM_SEND`(0x0101): `realm_id:u64, channel_id:u64, author:u64, content:String, nonce:Option<String>` — `SendMessage` 단일 액션(소유 노드에서 persist+ID 확정).
-> - `REALM_EMIT`(0x0104): `realm_id:u64, t:String, payload:String` — 비-메시지 이벤트(멤버 변동 등) 팬아웃을 소유 노드에 위임. `payload`=클라에 나갈 JSON을 미리 직렬화한 불투명 문자열(하위 계층은 파싱 안 함, D39/P2).
+> - `REALM_EMIT`(0x0104): `realm_id:u64, t:String, payload:String, fact:Option<EventFact>` — 비-메시지 이벤트(멤버 변동 등) 팬아웃을 소유 노드에 위임. `payload`=클라에 나갈 JSON을 미리 직렬화한 불투명 문자열(하위 계층은 파싱 안 함, D39/P2). `fact`(D48/E2)=이벤트 소싱 사실의 **primitive 슬롯** `EventFact{code:u8, message_id:u64, channel_id:u64, user_id:u64}`(미사용 슬롯 0, code 1=MessageCreated 2=MessageDeleted 3=MemberJoined 4=MemberLeft) — 소유 노드 dispatch가 복원해 `realm_events`에 append(단일 소비자 무경합 유지). 와이어: `payload` 뒤 `bool` present-flag + (있으면) `code:u8, 3×u64`.
 > - `REALM_FANOUT`(0x0103): `realm_id:u64, t:String, payload:String, user_ids:Vec<u64>` — **모든 DISPATCH 이벤트 공용**. `t`=이벤트 이름(`MESSAGE_CREATE`/`GUILD_MEMBER_ADD` …), `payload`=직렬화된 JSON. (이전의 메시지 전용 평탄 필드는 payload 안으로 흡수.)
 > 즉 §5의 `event_type:u16 + event_body:Bytes`를 **`t:String + payload:String(JSON)`**로 구체화했다(가독·디버깅 우선, 압축은 후속 flags COMPRESSED). edit/delete/react도 같은 `REALM_FANOUT`에 `t`만 바꿔 실어 보낸다.
 

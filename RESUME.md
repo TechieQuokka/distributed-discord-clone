@@ -14,8 +14,9 @@
 
 필요 시 깊게: `docs/design-discussion.md`(논쟁 서사), `docs/database/*`, `docs/api/*`, `docs/protocol/node-wire.md`, `docs/architecture/permissions.md`.
 
-## 2. 현재 상태 (2026-06-16, v1.45.0)
+## 2. 현재 상태 (2026-06-18, v1.50.0)
 
+- **v1.46~1.50 (Phase 5 잔여 마무리 — 결정 후 논스톱 구현)**: ① **Q7 액터 supervisor**(D50: let-it-crash + Router lazy 재spawn, v1.45.1) · ② **이벤트소싱 멤버/삭제 생산자**(E2/D48: emit에 타입 fact 동반→dispatch 단일 소비자 append, 원격은 REALM_EMIT EventFact 슬롯, v1.46) · ③ **D35 채널별 last_message_id warmup**(이벤트 로그 프로젝션으로 콜드 액터 복원→READY last_message_ids, v1.47) · ④ **Voice 제어 평면**(D47: op 4→권한 CONNECT→기존 emit 경로 팬아웃+VOICE_SERVER_UPDATE stub, 미디어 D21 제외, v1.48) · ⑤ **WebAuthn usernameless**(D19: discoverable 로그인, conditional-ui, v1.49) · ⑥ **크로스노드 RESUME=세션 마이그레이션**(D24: ResumeFetch broadcast→export→ResumeState→import+재구독, wire 0x0203/0x0204, v1.50). SWIM seed 다중화/주기 digest는 v1.40에 이미 구현됨. 테스트 181→**187**.
 - 설계 문서 + Phase 0/1/2/3/4 완료 + **Phase 5 대거 진행: SWIM(D45/D46) + WebAuthn(D19) + 이벤트 소싱(D48) + CRDT 오프라인 동기화(D49) + Voice 시그널링 설계(D47) + 하드닝(idle/dnd op3·신규 월 파티션 사전생성)**.
 - **CRDT 오프라인 동기화(1.45, D49)**: 상태 기반 CvRDT — `domain::crdt` 순수 툴킷(`LwwRegister`/`LwwMap`/`OrSet`/`PnCounter`, merge 결합·교환·멱등 법칙 8테스트). 적용=유저 동기화 문서(LWW-Map): `CrdtRepository` 포트 + storage LWW 가드 upsert(V21 `user_crdt_entries`) + REST `GET/POST /users/@me/sync`. **라이브 검증**(curl: 2기기 오프라인 편집 phone@200/laptop@210 → 충돌없이 laptop 수렴 → 이른 쓰기 재push 무시 → 툼스톤 삭제). seam: OrSet/PnCounter 미배선·REST 폴링(WS push 아님).
 - **이벤트 소싱(1.44, D48/D23)**: 가산형 CQRS — messages(진실) 위에 append-only 사실 로그. `domain::event`(순수 `RealmEventKind`+`RealmProjection` 결정론 fold, 4테스트) + `EventLogRepository` 포트 + storage V20 `realm_events`(타입화 bigint 슬롯, serde 무의존) + dispatch가 `MessageCreated` append(단일 직렬 소비자 D24→seq 경합 없음). **라이브 검증**(scenario→로그 1건). seam: append-persist 비트랜잭션·멤버/삭제 생산자·스냅샷 후속.
@@ -52,7 +53,7 @@
 - **인증 종단**: `/auth/register|login|refresh` (PASETO + refresh 회전/재사용탐지 D14) + TOTP MFA(D19) + **WebAuthn/Passkeys 암호없는 로그인**(D19, `auth::WebauthnService`, webauthn-rs).
 - **실시간 메시징 종단**: `PgStore`(통합 저장소, `Store` 슈퍼트레잇) → REST(`/guilds`, `/channels/:id/messages`, 히스토리 D38) → **WS Gateway**(IDENTIFY/READY/HEARTBEAT/DISPATCH, 자동구독 D13) → dispatch 드라이버(persist-then-fanout D24, nonce 멱등 D34) → 세션 push. CLI `scenario`로 종단 자동검증(D1).
 - Snowflake generator는 **노드당 1개**(D11, lock-free CAS)를 server가 소유해 Router·REST·Gateway에 주입.
-- 테스트 **181개** 통과 (domain **30**[+event 4 +crdt 8] + gateway **9** + node 37[lib 31 + dst 2 + swim_dst 4] + protocol 13 + **auth 19** + actor-rt 2 + transport 11 + cluster-config 4 + **rest-api 34** + **storage 22**[+partition/event/crdt DB]). WebAuthn(D19): auth SoftPasskey 라운드트립 + rest-api HTTP 통합(register→암호없는 login). Phase 5 추가분: SWIM 상태머신 단위 7 + **swim_dst**(동적합류 수렴·재현성·파티션→Dead·재합류 멱등). CLI scenario(PoW e2e) + Phase 4 기능 라이브 e2e + **Phase 5 라이브: 2정적+1동적 노드 합류(풀메시 자가구성, mTLS) + 동적 node CLI scenario PASS**. DB 라이브(**V1~V17 적용**, presence·유저라우팅·PoW·rate limit·blob FS·SWIM 멤버십은 무DB 휘발).
+- 테스트 **187개** 통과 (domain **30** + gateway **10**[+크로스노드 마이그레이션] + node **38**[lib 32 + dst 2 + swim_dst 4] + protocol **15**[+fact/resume 와이어] + **auth 20**[+discoverable] + actor-rt **3**[+패닉 계약] + transport 11 + cluster-config 4 + **rest-api 34** + **storage 22**). WebAuthn(D19): auth SoftPasskey 라운드트립 + rest-api HTTP 통합(register→암호없는 login). Phase 5 추가분: SWIM 상태머신 단위 7 + **swim_dst**(동적합류 수렴·재현성·파티션→Dead·재합류 멱등). CLI scenario(PoW e2e) + Phase 4 기능 라이브 e2e + **Phase 5 라이브: 2정적+1동적 노드 합류(풀메시 자가구성, mTLS) + 동적 node CLI scenario PASS**. DB 라이브(**V1~V17 적용**, presence·유저라우팅·PoW·rate limit·blob FS·SWIM 멤버십은 무DB 휘발).
 
 ## 3. 빌드·테스트·DB (⚠ crate별 독립 — R7)
 
@@ -85,13 +86,15 @@ cd backend/crates/storage && DATABASE_URL='postgres://david:2147483647@%2Fvar%2F
 
 ## 4. 다음 작업 — 여기서 이어서
 
-**Phase 5 대거 진행 완료(SWIM D45/D46·WebAuthn D19·이벤트소싱 D48·CRDT D49·Voice 설계 D47·하드닝 idle/dnd·파티션 사전생성).** Phase 0~4 + 분산 코어 완료. **frontend는 최후순위**(사용자 지침: 내부 로직 완전 종료 후). 남은 것:
+**Phase 5 전부 마무리(v1.50).** Phase 0~4 + 분산 코어 + Phase 5 스트레치(SWIM·WebAuthn·이벤트소싱·CRDT·Voice) + 잔여 하드닝 7건 완료. **frontend는 최후순위**(사용자 지침: 내부 로직 완전 종료 후). 남은 후속 seam(모두 의도적 비범위, 서두를 필요 없음):
 
-1. ~~CRDT 오프라인 동기화~~ **→ 완료(D49, v1.45)**. 후속: OrSet/PnCounter를 실제 기능(리액션 카운트 등)에 배선 · 실시간 WS push 동기화.
-2. ~~이벤트 소싱~~ **→ 가산형 완료(D48, v1.44)**. 후속: 멤버/삭제 이벤트 생산자 배선 · append-persist 트랜잭션 무결성 · 스냅샷/컴팩션 · **D35 캐시 warmup에 `RealmProjection` 연결**.
-3. ~~Voice 시그널링~~ **→ 설계 완료(D47, voice-signaling.md)**. 구현은 사용자 결정 시(미디어는 영구 제외 D21).
-4. ~~MinIO 첨부(D37)~~ — **범위 제외**(사용자 결정 2026-06-16): 로컬 테스트 전용 + 다중 PC/확장 의사 없음 → MinIO 불필요, `LocalFsBlobStore`로 충분. **`BlobStore` 포트는 유지**(domain↔IO 경계 P2). 필요 시 같은 포트에 어댑터 1개로 추가 가능.
-5. **세부 하드닝(잔여)** — 크로스노드 RESUME · D35 Realm 캐시 warmup(이벤트 소싱 재생과 연결 가능) · WebAuthn usernameless/멀티노드 ceremony · SWIM seed 다중화/주기 digest.
+1. **이벤트소싱 후속**: append-persist 완전 원자성(E1=현재 eventual 수용) · 스냅샷/컴팩션(전체 재생) · 웹훅 MESSAGE_CREATE 미기록.
+2. **D35 후속**: 메시지 **content** 캐시(읽기 경로 재라우팅 필요 — 현재는 채널별 last_message_id만) · warmup O(events) 최적화(스냅샷과 함께).
+3. **Voice 후속**: 액터 voice_states 맵 + READY 스냅샷 + 서버 모더레이션(MUTE/DEAFEN/MOVE) — 현재 fanout-only. 미디어는 영구 제외(D21).
+4. **CRDT 후속**: OrSet/PnCounter 실기능 배선(리액션 카운트) · WS push 동기화(현재 REST 폴링).
+5. **크로스노드 후속**: 멀티-세션 유저 분산 시 재구독 단일노드 덮음 · WebAuthn 멀티노드 ceremony 공유(크로스노드 RESUME과 동류).
+6. ~~MinIO 첨부(D37)~~ — **범위 제외**(`LocalFsBlobStore`로 충분, `BlobStore` 포트는 유지).
+7. **frontend(D30)** — 내부 로직 완료됐으니 이제 착수 가능(React+TS+Vite, R4 순서상 backend·API·CLI 후).
 
 > 큰 기능은 이 프로젝트 DNA(P1 청사진 우선·debate-first)상 착수 전 설계 합의 권장. 이번 D48/D49는 "설계 문서(decisions D번호) 먼저 → 바로 구현" 방식으로 진행(사용자 승인).
 

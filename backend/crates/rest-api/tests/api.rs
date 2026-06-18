@@ -949,7 +949,13 @@ struct RecordingEmitter {
 }
 
 impl domain::emit::RealmEmitter for RecordingEmitter {
-    fn emit(&self, realm: RealmId, t: String, payload: String) -> domain::emit::BoxFuture<'_, ()> {
+    fn emit(
+        &self,
+        realm: RealmId,
+        t: String,
+        payload: String,
+        _fact: Option<domain::event::RealmEventKind>,
+    ) -> domain::emit::BoxFuture<'_, ()> {
         self.events.lock().unwrap().push((realm.0.raw(), t, payload));
         Box::pin(async {})
     }

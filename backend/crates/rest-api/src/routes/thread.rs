@@ -108,7 +108,7 @@ async fn create_thread<S: Store + 'static>(
         .await?;
     let thread = st.store.get_thread(id).await?.ok_or(ApiError::NotFound)?;
 
-    let _ = st.emitter.emit(parent_ch.realm_id, "THREAD_CREATE".into(), thread_payload(&thread)).await;
+    let _ = st.emitter.emit(parent_ch.realm_id, "THREAD_CREATE".into(), thread_payload(&thread), None).await;
     Ok((StatusCode::CREATED, Json(thread.into())))
 }
 
@@ -148,6 +148,6 @@ async fn update_thread<S: Store + 'static>(
     st.store.set_thread_archived(tid, req.archived).await?;
     let updated = st.store.get_thread(tid).await?.ok_or(ApiError::NotFound)?;
 
-    let _ = st.emitter.emit(thread.realm_id, "THREAD_UPDATE".into(), thread_payload(&updated)).await;
+    let _ = st.emitter.emit(thread.realm_id, "THREAD_UPDATE".into(), thread_payload(&updated), None).await;
     Ok(Json(updated.into()))
 }

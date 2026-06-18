@@ -62,4 +62,4 @@ Rust 기반 분산 Discord 클론 — 설계 문서 모음.
 비범위(명시): 합의(Raft) 없음, Voice 미디어 없음
 ```
 
-> 현재 단계: **Phase 5 대거 진행** (v1.45) — SWIM(D45/D46) · WebAuthn(D19) · **이벤트 소싱(D48, 가산형 CQRS)** · **CRDT 오프라인 동기화(D49, 상태기반 CvRDT)** · **Voice 시그널링 설계(D47, 미디어 제외)** · 하드닝(idle/dnd op3·신규 월 파티션 사전생성). Phase 0~4 완료. 잔여: 세부 하드닝 · 크로스노드 RESUME · 액터 supervisor(Q7). MinIO는 범위 제외(D37, 로컬 테스트 전용·확장 의사 없음 — BlobStore 포트는 유지). frontend(D30)는 최후순위. (이어서 → [RESUME.md](../RESUME.md))
+> 현재 단계: **Phase 5 마무리 완료** (v1.50) — SWIM(D45/D46) · WebAuthn(D19, **usernameless 포함**) · **이벤트 소싱(D48, 멤버/삭제 생산자 포함)** · **CRDT(D49)** · **Voice 제어 평면(D47, 미디어 제외 D21)** · **액터 supervisor(Q7/D50)** · **D35 last_message_id warmup** · **크로스노드 RESUME=세션 마이그레이션(D24)**. Phase 0~4 완료, 잔여 하드닝 7건 모두 마감. MinIO는 범위 제외(D37). frontend(D30)는 이제 착수 가능(최후순위). 테스트 187. (이어서 → [RESUME.md](../RESUME.md))

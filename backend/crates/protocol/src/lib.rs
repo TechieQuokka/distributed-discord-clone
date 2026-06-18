@@ -11,4 +11,4 @@ pub mod message;
 
 pub use codec::{DecodeError, Reader, Writer};
 pub use frame::{Header, MAX_FRAME, PROTOCOL_VERSION, encode_frame, read_frame};
-pub use message::{NodeMessage, SwimMember, msg_type};
+pub use message::{EventFact, NodeMessage, SwimMember, msg_type};

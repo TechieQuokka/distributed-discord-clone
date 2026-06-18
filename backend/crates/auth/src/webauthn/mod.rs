@@ -10,9 +10,9 @@ use crate::error::AuthError;
 
 // rest-api/cli가 ceremony 상태·자격증명을 다루기 위한 타입 재노출.
 pub use webauthn_rs::prelude::{
-    AuthenticationResult, CreationChallengeResponse, Passkey, PasskeyAuthentication,
-    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
-    Url, Uuid,
+    AuthenticationResult, CreationChallengeResponse, DiscoverableAuthentication, DiscoverableKey,
+    Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, RequestChallengeResponse, Url, Uuid,
 };
 
 fn err<E: std::fmt::Display>(e: E) -> AuthError {
@@ -69,11 +69,44 @@ impl WebauthnService {
     ) -> Result<AuthenticationResult, AuthError> {
         self.inner.finish_passkey_authentication(cred, state).map_err(err)
     }
+
+    // ─── Usernameless (discoverable) 로그인 (D19) ───────────────────────────────
+    // username 없이: 인증기가 resident key로 유저를 고른다. 서버는 challenge만 발급(누구인지 모름),
+    // finish에서 자격증명의 user handle로 유저를 식별 → 그 유저의 passkey로 검증.
+
+    /// discoverable 인증 시작 — username 불요. challenge + 중간상태 발급.
+    pub fn start_discoverable_auth(
+        &self,
+    ) -> Result<(RequestChallengeResponse, DiscoverableAuthentication), AuthError> {
+        self.inner.start_discoverable_authentication().map_err(err)
+    }
+
+    /// 응답의 user handle에서 유저 Snowflake 식별 (finish 전 어느 유저인지 판별 → passkey 로드용).
+    pub fn identify_discoverable(&self, cred: &PublicKeyCredential) -> Result<u64, AuthError> {
+        let (uuid, _cred_id) = self.inner.identify_discoverable_authentication(cred).map_err(err)?;
+        Ok(uuid_to_snowflake(&uuid))
+    }
+
+    /// discoverable 인증 완료 → 검증 결과. `passkeys` = 식별된 유저의 등록 자격증명.
+    pub fn finish_discoverable_auth(
+        &self,
+        cred: &PublicKeyCredential,
+        state: DiscoverableAuthentication,
+        passkeys: &[Passkey],
+    ) -> Result<AuthenticationResult, AuthError> {
+        let keys: Vec<DiscoverableKey> = passkeys.iter().map(DiscoverableKey::from).collect();
+        self.inner.finish_discoverable_authentication(cred, state, &keys).map_err(err)
+    }
 }
 
 /// Snowflake u64 → 결정론 Uuid (webauthn `user_unique_id`).
 pub fn user_uuid(snowflake: u64) -> Uuid {
     Uuid::from_u128(snowflake as u128)
+}
+
+/// `user_uuid`의 역 — discoverable user handle(Uuid)에서 유저 Snowflake 복원.
+pub fn uuid_to_snowflake(uuid: &Uuid) -> u64 {
+    uuid.as_u128() as u64
 }
 
 /// `Passkey`의 자격증명 id 바이트 (저장/조회 키).
@@ -107,5 +140,18 @@ mod tests {
 
         // counter가 등록 후 인증으로 진전 가능(클론 탐지 토대) — needs_update 호출이 동작.
         let _ = res.needs_update();
+    }
+
+    /// Usernameless(discoverable) — 헤드리스로 검증 가능한 부분 (D19). 전체 서명 라운드트립은 resident-key
+    /// 탐색이 필요해 실제 인증기(브라우저/플랫폼) 영역 — SoftPasskey는 discoverable 탐색 미지원(seam).
+    #[test]
+    fn discoverable_start_and_user_handle_roundtrip() {
+        let svc = WebauthnService::new("localhost", "http://localhost:8080").unwrap();
+        // username 없이 challenge 발급이 성공(중간상태 동반).
+        let (_rcr, _state) = svc.start_discoverable_auth().expect("discoverable challenge");
+        // user handle(Uuid) ↔ Snowflake 무손실 왕복 — finish에서 유저 식별의 토대.
+        for sf in [1u64, 0xABCDEF, u64::MAX, 0] {
+            assert_eq!(uuid_to_snowflake(&user_uuid(sf)), sf);
+        }
     }
 }
