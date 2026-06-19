@@ -261,6 +261,9 @@
 
 ### D30. Frontend = React + TS + Vite
 - REST = TanStack Query, WS = 네이티브 클라이언트. (모던 선호 시 SvelteKit이 대안이나 기본은 React.)
+- **착수 결정 (v1.51, 2026-06-19)**: frontend는 backend·CLI 완료 후 착수(R4). **CLI를 검증된 레퍼런스 클라이언트로 삼아** 그 REST/WS 계약을 그대로 미러링한다. frontend는 **완전 독립체**(별도 `frontend/`, 자체 빌드/버전, 언제든 폐기·재작성 가능) — backend 소스는 수정하지 않는다(사용자 규칙). dev는 **Vite proxy**(`/api`→REST, `/gateway`→WS)로 CORS 없이 동일 backend를 물어 CLI와 상호운용 검증.
+- **읽기 엔드포인트 보강 (v1.51, 규칙2 승인)**: 웹 UI는 로그인 직후 "내 서버→채널" 트리를 그려야 하나, CLI는 id를 인자로 직접 넘겨 목록 API가 없었다(`GET /guilds/{id}/channels` 부재, READY.realms는 id만). 어떤 웹 클라이언트에도 필요한 read-only 조각이므로 **rest-api에 라우트 2개만** 추가했다(저장소/도메인/마이그레이션 무변경): `GET /guilds/{id}/channels`(`list_by_realm` 재사용)·`GET /users/@me/realms`(`member_realm_ids`+`get_realm` 조합). rest.md §0 표 반영.
+- **스택 확정 (v1.51)**: React 19 + TS + Vite, Tailwind CSS, TanStack Query(REST), 네이티브 WebSocket(gateway), zustand(인증/실시간 상태). PoW(D18) 가입 퍼즐은 브라우저에서 Web Worker + 동기 sha256(@noble/hashes)로 재현(서버 알고리즘과 동일: `sha256(challenge||":"||nonce)` 선행 0비트 ≥ difficulty).
 
 ---
 

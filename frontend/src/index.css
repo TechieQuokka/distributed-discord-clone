@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* Discord 다크 테마 팔레트(소수 변수로). Tailwind v4 @theme로 토큰 노출. */
+@theme {
+  --color-bg-app: #313338;
+  --color-bg-sidebar: #2b2d31;
+  --color-bg-server: #1e1f22;
+  --color-bg-input: #383a40;
+  --color-bg-hover: #393c41;
+  --color-bg-selected: #404249;
+  --color-accent: #5865f2;
+  --color-accent-hover: #4752c4;
+  --color-online: #23a55a;
+  --color-idle: #f0b232;
+  --color-dnd: #f23f43;
+  --color-text-normal: #dbdee1;
+  --color-text-muted: #949ba4;
+  --color-text-bright: #f2f3f5;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg-app);
+  color: var(--color-text-normal);
+  font-family: "gg sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+/* 스크롤바 — Discord 풍 얇은 다크. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a1b1e;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

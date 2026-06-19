@@ -2107,3 +2107,57 @@ async fn crdt_sync_requires_auth() {
     let (st, _) = h.req("GET", "/users/@me/sync", None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "인증 없으면 401");
 }
+
+// ── 웹 UI 디스커버리: 채널 목록 / 내 realm 목록 (frontend D30) ───────────
+
+#[tokio::test]
+async fn list_channels_returns_guild_channels_for_member() {
+    let h = Harness::new();
+    let owner = h.user("owner");
+    let tok = h.token(owner);
+    let (gid, chan) = make_guild(&h, &tok).await;
+
+    let (st, body) = h.req("GET", &format!("/guilds/{gid}/channels"), Some(&tok), None).await;
+    assert_eq!(st, StatusCode::OK, "list channels: {body}");
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "general 채널 1개");
+    assert_eq!(arr[0]["id"], json!(chan));
+    assert_eq!(arr[0]["name"], json!("general"));
+    assert_eq!(arr[0]["kind"], json!("text"));
+}
+
+#[tokio::test]
+async fn list_channels_forbidden_for_non_member() {
+    let h = Harness::new();
+    let owner = h.user("owner");
+    let otok = h.token(owner);
+    let (gid, _) = make_guild(&h, &otok).await;
+
+    let outsider = h.user("outsider");
+    let xtok = h.token(outsider);
+    let (st, _) = h.req("GET", &format!("/guilds/{gid}/channels"), Some(&xtok), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "비멤버는 403");
+}
+
+#[tokio::test]
+async fn list_my_realms_includes_created_guild() {
+    let h = Harness::new();
+    let owner = h.user("owner");
+    let tok = h.token(owner);
+    let (gid, _) = make_guild(&h, &tok).await;
+
+    let (st, body) = h.req("GET", "/users/@me/realms", Some(&tok), None).await;
+    assert_eq!(st, StatusCode::OK, "list realms: {body}");
+    let arr = body.as_array().unwrap();
+    let mine = arr.iter().find(|r| r["id"] == json!(gid)).expect("내 길드가 목록에 있어야");
+    assert_eq!(mine["kind"], json!("guild"));
+    assert_eq!(mine["name"], json!("G"));
+    assert_eq!(mine["owner_id"], json!(owner.to_string()));
+}
+
+#[tokio::test]
+async fn list_my_realms_requires_auth() {
+    let h = Harness::new();
+    let (st, _) = h.req("GET", "/users/@me/realms", None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "인증 없으면 401");
+}

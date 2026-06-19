@@ -49,6 +49,8 @@ X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After
 | POST | `/auth/mfa/totp` | — | 로그인 2단계: `username`+`password`+`code` → 토큰 (D19) |
 | POST | `/guilds` | — | 길드 + @everyone 역할 + 기본 general 채널 |
 | POST | `/guilds/{id}/channels` | MANAGE_CHANNELS | `kind` 선택(text/voice/category/announcement/forum, D44) |
+| GET | `/guilds/{id}/channels` | 멤버 | 길드 채널 목록 `[{id,name,kind}]` — 웹 UI 채널 트리(D30). `list_by_realm` 재사용 |
+| GET | `/users/@me/realms` | (인증) | 내 Realm 목록 `[{id,name,kind,owner_id}]`(guild/dm/group_dm) — 웹 UI 서버/DM 목록(D30). READY realm-id 보완 |
 | POST / GET | `/channels/{id}/threads` | 생성=CREATE_PUBLIC_THREADS / 목록=VIEW_CHANNEL | 스레드 생성·목록 (D44, 스레드=채널 P4). 생성 시 `THREAD_CREATE` 팬아웃 |
 | PATCH | `/channels/{id}/thread` | 소유자 또는 MANAGE_THREADS | 스레드 아카이브/해제 → `THREAD_UPDATE` 팬아웃 (D44) |
 | GET / POST | `/guilds/{id}/roles` | GET=멤버 / POST=MANAGE_ROLES (권한상승 방지) | |

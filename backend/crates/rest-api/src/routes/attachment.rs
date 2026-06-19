@@ -6,7 +6,7 @@
 //! 메타는 attachments(V14). 다운로드: `GET /attachments/:id`(채널 VIEW_CHANNEL).
 
 use axum::body::Body;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
@@ -28,7 +28,11 @@ pub fn routes<S: Store + 'static>() -> axum::Router<AppState<S>> {
     axum::Router::new()
         .route(
             "/channels/{channel_id}/messages/{message_id}/attachments",
-            get(list_attachments::<S>).post(upload_attachment::<S>),
+            // axum 기본 본문 한계(2MB)는 핸들러의 8 MiB 검사보다 먼저 잘라 400을 낸다 →
+            // 이 라우트만 한계를 8 MiB+멀티파트 여유로 올려 핸들러 의도와 일치시킨다.
+            get(list_attachments::<S>)
+                .post(upload_attachment::<S>)
+                .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES + 64 * 1024)),
         )
         .route("/attachments/{attachment_id}", get(download_attachment::<S>))
 }

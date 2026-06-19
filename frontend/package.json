@@ -1,0 +1,32 @@
+{
+  "name": "discord-clone-frontend",
+  "version": "0.1.4",
+  "description": "분산 Discord 클론 웹 UI — React + TS + Vite (D30). CLI를 레퍼런스로 backend 계약 미러링. 독립체(언제든 폐기·재작성 가능).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "@tanstack/react-query": "^5.101.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}
