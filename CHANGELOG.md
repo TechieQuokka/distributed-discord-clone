@@ -5,6 +5,25 @@
 
 ---
 
+## [1.51.1] - 2026-06-19
+### 수정 — 첨부 업로드 2MB 한계 버그 (웹 UI 검증 중 발견)
+- **증상**: 2MB 초과 이미지 첨부가 `400 "read field: Error parsing multipart/form-data request"`로 실패. 핸들러는 `MAX_ATTACHMENT_BYTES = 8 MiB`를 의도했으나, axum 기본 `DefaultBodyLimit`(2MB)이 그 검사에 닿기 전에 본문을 잘라 8 MiB 상한이 **죽은 코드**였다.
+- **수정**: `routes/attachment.rs`의 업로드 라우트에 `DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES + 64 KiB)` 레이어 추가 → 핸들러 의도대로 8 MiB까지 실제 허용(멀티파트 경계 여유 포함). 라우트 한정 적용이라 다른 엔드포인트 본문 한계는 불변.
+- **검증**: 3MB 업로드 `400 → 201`, 1MB·9MB+ 경계 확인. crate: `rest-api` 1.22.0→1.22.1.
+- 발견 경위: frontend 첨부 e2e 중 표면화. frontend도 동행 수정(0.1.1, WS 프레임 유실 대비 REST 백업 flush — 별개 이슈).
+
+---
+
+## [1.51.0] - 2026-06-19
+### 새 기능 — 웹 UI 디스커버리 읽기 엔드포인트 (D30 frontend 착수)
+- **`GET /guilds/{realm_id}/channels`** (멤버) — 길드 채널 목록. 웹 클라이언트의 채널 트리 로딩용. 기존 `ChannelRepository::list_by_realm` 재사용(저장소 무변경).
+- **`GET /users/@me/realms`** (인증) — 내가 멤버인 Realm 목록을 **이름·종류(guild/dm/group_dm)·소유자**와 함께 반환. READY의 realm-id 목록(이름 없음)을 보완. 기존 `member_realm_ids` + `get_realm` 조합(저장소 무변경).
+- **배경**: CLI는 id를 인자로 직접 넘겨 목록 엔드포인트가 불필요했으나, 브라우저 클라이언트는 로그인 직후 "내 서버 → 채널" 트리를 그려야 함. 어떤 웹 클라이언트에도 필요한 읽기 조각이라 사용자 승인 후 추가(규칙2). read-only·마이그레이션 없음·도메인/저장소 무변경 — **rest-api 라우트만 추가**.
+- crate 변경: `rest-api` — `routes/guild.rs`에 `list_channels` GET 추가 + 신규 `routes/realm.rs`(`/users/@me/realms`) + 통합 테스트 4(30→34). (1.21→1.22)
+- 문서: `decisions.md` D30(읽기 엔드포인트 추가 노트), `api/rest.md` 구현 현황 표 2행.
+
+---
+
 ## [1.50.0] - 2026-06-18
 ### 새 기능 — 크로스노드 RESUME = 세션 마이그레이션 (D24)
 - **재연결이 다른 노드에 닿아도 RESUME** — 기존엔 재생 버퍼가 노드 로컬(Hub)이라 원조가 아닌 노드에 재연결하면 INVALID_SESSION(전체 재동기)였다. 이제 그 노드가 원조에서 세션을 **핸드오프**받아 재개.

@@ -6,7 +6,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use domain::channel::{ChannelKind, NewChannel};
+use domain::channel::{Channel, ChannelKind, NewChannel};
 use domain::guild::NewGuild;
 use domain::id::{ChannelId, RealmId, Snowflake};
 use domain::repo::Store;
@@ -19,7 +19,7 @@ use crate::state::AppState;
 pub fn routes<S: Store + 'static>() -> axum::Router<AppState<S>> {
     axum::Router::new()
         .route("/guilds", post(create_guild::<S>))
-        .route("/guilds/{realm_id}/channels", post(create_channel::<S>))
+        .route("/guilds/{realm_id}/channels", post(create_channel::<S>).get(list_channels::<S>))
 }
 
 #[derive(Deserialize)]
@@ -51,6 +51,12 @@ pub struct ChannelView {
     pub id: String,
     pub name: Option<String>,
     pub kind: String,
+}
+
+impl From<Channel> for ChannelView {
+    fn from(c: Channel) -> Self {
+        ChannelView { id: c.id.0.raw().to_string(), name: c.name, kind: c.kind.as_str().to_owned() }
+    }
 }
 
 #[derive(Serialize)]
@@ -105,6 +111,20 @@ async fn create_guild<S: Store + 'static>(
             }],
         }),
     ))
+}
+
+/// 길드 채널 목록 (멤버만). 웹 UI의 채널 트리 로딩용 — `list_by_realm` 재사용.
+async fn list_channels<S: Store + 'static>(
+    State(st): State<AppState<S>>,
+    AuthUser(user): AuthUser,
+    Path(realm_id): Path<String>,
+) -> Result<Json<Vec<ChannelView>>, ApiError> {
+    let realm = parse_realm(&realm_id)?;
+    if !st.store.is_member(realm, user).await? {
+        return Err(ApiError::Forbidden);
+    }
+    let channels = st.store.list_by_realm(realm).await?;
+    Ok(Json(channels.into_iter().map(ChannelView::from).collect()))
 }
 
 async fn create_channel<S: Store + 'static>(

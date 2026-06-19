@@ -4,6 +4,8 @@ target/
 # frontend (web)
 /frontend/node_modules
 /frontend/dist
+# 첨부 blob 런타임 저장소 (LocalFsBlobStore, D37) — 런타임 데이터라 커밋 제외
+**/attachments/
 # secrets
 .env
 *.pem

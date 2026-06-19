@@ -10,6 +10,7 @@ pub mod invite;
 pub mod member;
 pub mod message;
 pub mod read_state;
+pub mod realm;
 pub mod relationship;
 pub mod role;
 pub mod sync;
@@ -31,6 +32,7 @@ pub fn router<S: Store + 'static>(state: AppState<S>) -> axum::Router {
         .merge(dm::routes::<S>())
         .merge(relationship::routes::<S>())
         .merge(read_state::routes::<S>())
+        .merge(realm::routes::<S>())
         .merge(sync::routes::<S>())
         .merge(member::routes::<S>())
         .merge(role::routes::<S>())
